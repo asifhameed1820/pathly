@@ -56,6 +56,7 @@ import { JobCard } from "@/components/career/JobCard";
 import { DETAILED_JOBS_AND_EXAMS } from "@/lib/jobsData";
 import { COURSES_DATA, getCourseById } from "@/lib/coursesData";
 import { useAuth } from "@/lib/context/AuthContext";
+import { cn } from "@/lib/utils";
 
 interface DashboardScreenProps {
   onRestartDemo?: () => void;
@@ -400,7 +401,12 @@ export function DashboardScreen({ onRestartDemo }: DashboardScreenProps) {
       </header>
 
       {/* MAIN SCROLLABLE CONTENT */}
-      <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar">
+      <div
+        className={cn(
+          "flex-1 min-h-0 w-full overflow-x-hidden",
+          activeTab === "ai" ? "h-full flex flex-col overflow-hidden" : "overflow-y-auto no-scrollbar"
+        )}
+      >
         {/* ========================================================================= */}
         {/* TAB 1: HOME                                                               */}
         {/* ========================================================================= */}
@@ -822,19 +828,21 @@ export function DashboardScreen({ onRestartDemo }: DashboardScreenProps) {
         {/* TAB 4: AI COACH                                                           */}
         {/* ========================================================================= */}
         {activeTab === "ai" && (
-          <AiCoachScreen
-            onSelectCourse={(courseId) => {
-              setSelectedCourseId(courseId);
-              setSubScreen("course_details");
-            }}
-            onSelectJob={(jobId) => {
-              setSelectedJobId(jobId);
-              setSubScreen("job_details");
-            }}
-            onNavigateToTab={(tab) => {
-              setActiveTab(tab);
-            }}
-          />
+          <div className="h-full w-full flex-1 min-h-0 flex flex-col overflow-hidden">
+            <AiCoachScreen
+              onSelectCourse={(courseId) => {
+                setSelectedCourseId(courseId);
+                setSubScreen("course_details");
+              }}
+              onSelectJob={(jobId) => {
+                setSelectedJobId(jobId);
+                setSubScreen("job_details");
+              }}
+              onNavigateToTab={(tab) => {
+                setActiveTab(tab);
+              }}
+            />
+          </div>
         )}
 
         {/* ========================================================================= */}

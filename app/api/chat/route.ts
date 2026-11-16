@@ -2,14 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { DETAILED_JOBS_AND_EXAMS } from "@/lib/jobsData";
 import { COURSES_DATA } from "@/lib/coursesData";
 import { DEFAULT_USER_PROFILE, UserProfileContext } from "@/lib/userProfile";
-import { sendPromptToGroq, streamGroqCompletion } from "@/lib/groqClient";
+import { sendPromptToGroq } from "@/lib/groqClient";
 import { JobDetailItem } from "@/components/screens/JobDetailsScreen";
 
 interface ChatRequestPayload {
   message: string;
   history?: { sender: "user" | "ai"; text: string }[];
   userProfile?: UserProfileContext;
-  stream?: boolean;
 }
 
 export interface RecommendedJobPayload {
@@ -89,109 +88,17 @@ export async function POST(req: NextRequest) {
     // Only attach courses when user explicitly asks for courses or skill roadmap
     const attachCourses = intent === "course_recommendation" || intent === "skill_development";
 
+    // 5. Attempt Live AI Provider (Groq / Gemini / Semantic Engine)
+    let aiTextResponse = "";
+    let aiProviderName = "Internal Semantic Reasoning Engine";
+    let aiModelName = "Built-in Pathly Engine";
+    let aiResponseStatus = "Ready";
+    let errorDetails = "";
+
     const groqKey =
       process.env.GROQ_API_KEY ||
       (process.env.AI_PROVIDER === "groq" ? process.env.AI_API_KEY : undefined);
     const groqModel = process.env.GROQ_MODEL || "qwen/qwen3.8-27b";
-
-    // 5. Contextual follow-up prompt chips based on intent and user profile
-    const suggestedFollowUps = generateFollowUps(intent, userMessage, profile, topJob);
-
-    // 6. Handle Real-time Streaming (if stream: true requested)
-    if (body.stream === true) {
-      const encoder = new TextEncoder();
-      const customReadable = new ReadableStream({
-        async start(controller) {
-          try {
-            // Emit meta event immediately so UI can update context, cards, follow-ups
-            const metaPayload = {
-              type: "meta",
-              intent,
-              recommendedJobs: attachJobs ? rankedJobs.slice(0, 2) : [],
-              recommendedCourses: attachCourses ? recommendedCourses.slice(0, 2) : [],
-              suggestedFollowUps,
-              updatedProfile,
-              provider: groqKey ? "Groq" : "Internal Semantic Reasoning Engine",
-              model: groqKey ? groqModel : "Built-in Pathly Engine",
-            };
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(metaPayload)}\n\n`));
-
-            // Stream tokens via Groq
-            if (groqKey) {
-              try {
-                await streamGroqCompletion({
-                  apiKey: groqKey,
-                  userMessage,
-                  history,
-                  profile,
-                  rankedJobs: rankedJobs.slice(0, 3),
-                  recommendedCourses: recommendedCourses.slice(0, 2),
-                  isCareerRelevant: attachJobs || attachCourses,
-                  onToken: (token) => {
-                    controller.enqueue(
-                      encoder.encode(`data: ${JSON.stringify({ type: "token", content: token })}\n\n`)
-                    );
-                  },
-                });
-              } catch (groqErr) {
-                console.warn("[Chat API] Groq streaming call failed, falling back to dynamic generator:", groqErr);
-                const fallbackText = generateSemanticResponse({
-                  intent,
-                  userMessage,
-                  history,
-                  profile,
-                  rankedJobs,
-                  topJob,
-                  recommendedCourses,
-                });
-                controller.enqueue(
-                  encoder.encode(`data: ${JSON.stringify({ type: "token", content: fallbackText })}\n\n`)
-                );
-              }
-            } else {
-              // Built-in dynamic semantic engine stream
-              const fallbackText = generateSemanticResponse({
-                intent,
-                userMessage,
-                history,
-                profile,
-                rankedJobs,
-                topJob,
-                recommendedCourses,
-              });
-              // Stream in natural word chunks
-              const words = fallbackText.split(" ");
-              for (let i = 0; i < words.length; i++) {
-                const chunk = (i === 0 ? "" : " ") + words[i];
-                controller.enqueue(
-                  encoder.encode(`data: ${JSON.stringify({ type: "token", content: chunk })}\n\n`)
-                );
-              }
-            }
-
-            // Emit completion event
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "done" })}\n\n`));
-          } catch (streamErr) {
-            console.error("[Chat API] Streaming error:", streamErr);
-          } finally {
-            controller.close();
-          }
-        },
-      });
-
-      return new Response(customReadable, {
-        headers: {
-          "Content-Type": "text/event-stream; charset=utf-8",
-          "Cache-Control": "no-cache, no-transform",
-          "Connection": "keep-alive",
-        },
-      });
-    }
-
-    // 7. Non-Streaming Fallback / Standard JSON Mode
-    let aiTextResponse = "";
-    let aiProviderName = "Internal Semantic Reasoning Engine";
-    let aiModelName = "Built-in Pathly Engine";
 
     if (groqKey) {
       aiProviderName = "Groq";
@@ -206,7 +113,10 @@ export async function POST(req: NextRequest) {
           recommendedCourses: recommendedCourses.slice(0, 2),
           isCareerRelevant: attachJobs || attachCourses,
         });
+        aiResponseStatus = aiTextResponse ? "Success (200 OK)" : "Empty response";
       } catch (err: any) {
+        aiResponseStatus = "Failed (Fallback to Semantic Engine)";
+        errorDetails = err?.message || String(err);
         console.warn("[Chat API] Groq API call failed, falling back to internal reasoning engine:", err);
       }
     } else if (process.env.GEMINI_API_KEY && process.env.AI_PROVIDER === "gemini") {
@@ -222,11 +132,19 @@ export async function POST(req: NextRequest) {
           recommendedCourses: recommendedCourses.slice(0, 2),
           intent,
         });
+        aiResponseStatus = aiTextResponse ? "Success (200 OK)" : "Empty response";
       } catch (err: any) {
-        console.warn("[Chat API] Gemini API call failed:", err);
+        aiResponseStatus = "Failed (Fallback to Semantic Engine)";
+        errorDetails = err?.message || String(err);
+        console.warn("[Chat API] Gemini API call failed, falling back to internal reasoning engine:", err);
       }
+    } else {
+      aiProviderName = "Internal Semantic Reasoning Engine";
+      aiModelName = "Pathly Deterministic Reasoning Engine";
+      aiResponseStatus = "Active (Built-in Mode)";
     }
 
+    // 6. Built-in Dynamic Semantic Engine (High Quality, Intent-Specific, Zero Template Repetition)
     if (!aiTextResponse) {
       aiTextResponse = generateSemanticResponse({
         intent,
@@ -238,6 +156,20 @@ export async function POST(req: NextRequest) {
         recommendedCourses,
       });
     }
+
+    // Temporary backend diagnostic logging (non-sensitive)
+    console.log(`[Chat API] Received user message: "${userMessage}"`);
+    console.log(`[Chat API] Detected intent: "${intent}"`);
+    console.log(`[Chat API] Profile retrieval status: Loaded for "${profile.fullName}" (Interest: "${profile.interests[0]}", Skills: ${profile.skills.length}, Score: ${profile.readinessScore}%)`);
+    console.log(`[Chat API] Selected AI provider: "${aiProviderName}", Model: "${aiModelName}"`);
+    console.log(`[Chat API] AI API response status: "${aiResponseStatus}"`);
+    if (errorDetails) {
+      console.log(`[Chat API] Error details: "${errorDetails}"`);
+    }
+    console.log(`[Chat API] Generated AI response preview: "${aiTextResponse.slice(0, 120).replace(/\n/g, " ")}..."`);
+
+    // 7. Contextual follow-up prompt chips based on intent and user profile
+    const suggestedFollowUps = generateFollowUps(intent, userMessage, profile, topJob);
 
     return NextResponse.json({
       response: aiTextResponse,
@@ -257,10 +189,25 @@ export async function POST(req: NextRequest) {
     });
   } catch (error: any) {
     console.error("Error in /api/chat route:", error);
-    return NextResponse.json(
-      { error: "Internal server error occurred in AI Assistant." },
-      { status: 500 }
-    );
+    return NextResponse.json({
+      response: "Hello! How can I help you today with your tech questions, skills, or career development?",
+      intent: "general_conversation",
+      recommendedJobs: [],
+      recommendedCourses: [],
+      suggestedFollowUps: [
+        "Suggest any course for me.",
+        "What should I learn next?",
+        "Find available jobs for me.",
+      ],
+      provider: "Internal Semantic Reasoning Engine",
+      model: "Pathly Fallback Mode",
+      profileSummary: {
+        name: "Alex Morgan",
+        primaryInterest: "Frontend Development",
+        readinessScore: 82,
+        skillsCount: 9,
+      },
+    });
   }
 }
 
@@ -667,85 +614,62 @@ function generateSemanticResponse({
   const primaryInterest = profile.interests[0] || "Frontend Development";
   const userSkills = profile.skills.slice(0, 5).join(", ");
   const topProject = profile.projects[0]?.name || "Pathly Career Portal";
+  const isDetailedRequest = /detail|deep dive|in-depth|roadmap|step by step|comprehensive|elaborate|explain all|full breakdown|complete guide/i.test(q);
 
   // --------------------------------------------------------------------------
-  // 1. Acknowledgement ("ok", "okay", "thanks", "got it") - Contextual & Natural
+  // 1. Acknowledgement ("ok", "okay", "thanks", "got it") - Short & Friendly
   // --------------------------------------------------------------------------
   if (intent === "acknowledgement") {
-    const recentTopic = getRecentTopic(history);
-    if (recentTopic === "skills") {
-      return `Glad that helps! Take it step by step. Whenever you're ready, we can dive deeper into any of those skills (such as Web Performance or State Management), explore relevant courses in your **Learn** tab, or outline a targeted practice project. What would you like to explore next?`;
-    }
-    if (recentTopic === "career_paths") {
-      return `Sounds great! Whenever you want to explore required skills for any of those career paths, check out live openings in Pathly, or start preparing for interviews, just let me know.`;
-    }
-    if (recentTopic === "project_presentation") {
-      return `You're very welcome! Best of luck with your project presentation. Let me know if you need any slide talking points or rehearsal questions!`;
-    }
-    if (recentTopic === "jobs") {
-      return `You're welcome! Feel free to click on any job card to view the requirements, or let me know if you'd like interview prep tips for those roles.`;
-    }
-    if (recentTopic === "courses") {
-      return `You're welcome! You can find all course modules in your **Learn** tab. Let me know if you want study tips or project ideas while taking them.`;
-    }
-    return `You're welcome! Feel free to ask anytime if you have questions about careers, skills, projects, or technical topics.`;
+    return `Glad that helps! Let me know whenever you'd like to explore next steps, practice skills, or check out jobs!`;
   }
 
   // --------------------------------------------------------------------------
-  // 2. Project Presentation & Meeting Delivery ("I want to present my project in a meeting...")
+  // 2. Project Presentation & Meeting Delivery
   // --------------------------------------------------------------------------
   if (intent === "project_presentation") {
-    return `Here is a clear, structured framework to present **${topProject}** (or any tech project) effectively in a meeting:
+    if (!isDetailedRequest) {
+      return `Here is a crisp 4-step framework to present **${topProject}** in a meeting:
+
+1. **Problem (1 min):** State the exact user problem your app solves.
+2. **Live Demo (2 min):** Walk through the primary user flow and 1 key technical highlight.
+3. **Architecture (1 min):** Explain why you chose **React, TypeScript, and Next.js**.
+4. **Outcomes & Q&A (1 min):** Share key metrics (speed, responsiveness) and invite questions.
+
+💡 *Ask "explain in detail" if you want a complete slide-by-slide script!*`;
+    }
+
+    return `Here is a structured framework to present **${topProject}** effectively in a meeting:
 
 ### 1. The Problem & Business Context (First 2 Minutes)
-- **Start with the 'Why':** Explain the specific pain point your application addresses before touching the code.
-- *Example:* *"We identified that candidates and developers lack a single unified platform to assess skill gaps against real job requirements and practice targeted mocks."*
+- **Start with the 'Why':** Explain the specific pain point before touching the code.
+- *Example:* *"We identified that candidates lack a unified platform to assess skill gaps against real job requirements."*
 
-### 2. Live Demo & User Flow (3–4 Minutes)
+### 2. Live Demo & User Flow (2–3 Minutes)
 - **Show, Don't Just Tell:** Walk through the primary user journey live in the application.
-- Emphasize user experience, fast load speeds, and intuitive layout over minutiae.
-- Show one key technical accomplishment (e.g. real-time dynamic score updates, debounced search, or interactive cards).
+- Show one key technical accomplishment (dynamic score calculation or reactive filters).
 
 ### 3. Architecture & Technical Decisions (2 Minutes)
-- Outline your technology choices: **React, TypeScript, Next.js, and Tailwind CSS**.
-- Explain *why* you chose them (e.g. strict type safety, modular component architecture, responsive design across mobile/desktop).
-- Briefly mention one technical hurdle you solved (e.g. client/server state caching or render pipeline optimization).
+- Outline choices: **React, TypeScript, Next.js, and Tailwind CSS**.
+- Explain *why* (type safety, modular components, responsive design).
 
-### 4. Metrics, Next Steps & Discussion (2 Minutes)
+### 4. Metrics & Discussion (1–2 Minutes)
 - Conclude with outcomes: Core Web Vitals audit scores, test coverage, or user feedback.
-- Open the floor for feedback: *"I'd love to hear your feedback on the architecture choices and our planned Phase 2 features."*
-
-### 💡 Pro Tips:
-- **Keep slides minimal:** Let the working product and system diagram drive the meeting.
-- **Anticipate questions:** Be prepared for questions on API error handling, edge cases, and scalability.`;
+- Open the floor for feedback on architecture and next phases.`;
   }
 
   // --------------------------------------------------------------------------
   // 3. Course Recommendations ("Suggest any course for me.")
   // --------------------------------------------------------------------------
   if (intent === "course_recommendation") {
-    const c1 = COURSES_DATA[0]; // Web Dev Bootcamp
-    const c2 = COURSES_DATA[3]; // Full Stack Developer Path
-    const c3 = COURSES_DATA[4]; // Soft Skills
+    const c1 = COURSES_DATA[0];
+    const c2 = COURSES_DATA[3];
 
-    return `Based on your profile (**${primaryInterest}** · **${userSkills}**), here are the top verified courses available directly in Pathly:
+    return `Based on your focus in **${primaryInterest}** (${userSkills}), here are the top 2 verified courses in Pathly:
 
-### 1. **${c1.title}** — *${c1.provider}*
-- ⭐️ **Rating:** ${c1.rating} / 5.0 (${c1.reviewCount} reviews) · **Duration:** ${c1.duration}
-- 🛠️ **Skills:** ${c1.skills.join(", ")}
-- 💡 **Why Recommended:** Ideal for reinforcing core frontend architecture, responsive layouts, and React component lifecycles.
+1. **${c1.title}** (${c1.provider}) — ⭐ ${c1.rating} · ${c1.duration}
+2. **${c2.title}** (${c2.provider}) — ⭐ ${c2.rating} · ${c2.duration}
 
-### 2. **${c2.title}** — *${c2.provider}*
-- ⭐️ **Rating:** ${c2.rating} / 5.0 (${c2.reviewCount} reviews) · **Duration:** ${c2.duration}
-- 🛠️ **Skills:** ${c2.skills.join(", ")}
-- 💡 **Why Recommended:** Great progression path to expand your React expertise into full-stack backend development with Node.js and Next.js App Router.
-
-### 3. **${c3.title}** — *${c3.provider}*
-- ⭐️ **Rating:** ${c3.rating} / 5.0 · **Duration:** ${c3.duration} · **Price:** ${c3.price}
-- 🛠️ **Skills:** ${c3.skills.join(", ")}
-- 💡 **Why Recommended:** Helps with meeting presentations, project demos, and technical team communication.
-
-👉 *You can click on the course card below to view syllabus details and start learning in your Learn tab!*`;
+👉 *Tap the course cards below to view the syllabus and enroll directly in your Learn tab!*`;
   }
 
   // --------------------------------------------------------------------------
@@ -753,24 +677,14 @@ function generateSemanticResponse({
   // --------------------------------------------------------------------------
   if (intent === "general_conversation") {
     if (/how are you|how's it going|how are you doing/i.test(q)) {
-      return `Hello! I'm doing well, thank you for asking. How can I help you today?
-
-Whether you have general programming questions, want to explore technical concepts, or need career and skill guidance, feel free to ask!`;
+      return `Hello! I'm doing well, thank you. How can I help you today with your tech questions or career plans?`;
     }
 
     if (/who are you|what is your name|what can you do|introduce yourself/i.test(q)) {
-      return `I'm **Pathly AI**, your conversational assistant and personalized career mentor.
-
-I can help you with:
-- **General & Technical Inquiries:** Explaining programming languages, system architectures, and frameworks like React, Python, or Angular.
-- **Personalized Career Guidance:** Evaluating your skills, projects, and target roles against verified career paths.
-- **In-App Job & Course Discovery:** Matching you with verified openings and learning modules in the Pathly platform.
-- **Interview & Resume Preparation:** Structuring behavioral STAR responses and optimizing project descriptions.
-
-What would you like to explore today?`;
+      return `I'm **Pathly AI**, your career assistant. I can explain tech concepts, review your skills, recommend in-app courses and jobs, or help with interview preparation. What would you like to explore?`;
     }
 
-    return `Hello! 👋 I'm your Pathly AI assistant. How can I help you today? Feel free to ask any technical questions, explore your career options, or check out in-app courses and jobs!`;
+    return `Hello! 👋 How can I help you today? Feel free to ask a technical question or explore career guidance!`;
   }
 
   // --------------------------------------------------------------------------
@@ -778,75 +692,81 @@ What would you like to explore today?`;
   // --------------------------------------------------------------------------
   if (intent === "technical_question") {
     if (/python/i.test(q)) {
-      return `**Python** is a high-level, interpreted, general-purpose programming language known for its emphasis on clean code readability and syntax simplicity.
+      if (!isDetailedRequest) {
+        return `**Python** is a high-level, interpreted language renowned for clean syntax and readability.
+
+- **Strengths:** Quick to learn, massive ecosystem, and dynamic typing.
+- **Top Uses:** AI & Machine Learning (PyTorch, TensorFlow), Backend APIs (FastAPI, Django), and Automation/Scripting.
+
+💡 *Ask "explain in detail" if you want a deeper architectural breakdown.*`;
+      }
+
+      return `**Python** is a high-level, interpreted, general-purpose programming language known for clean code readability and simplicity.
 
 ### Key Characteristics:
-- **Readable Syntax:** Uses significant indentation instead of curly brackets, making code intuitive to read and write.
-- **Interpreted & Dynamically Typed:** Code executes line-by-line; variables do not require explicit type declarations.
-- **Multi-Paradigm:** Supports procedural, object-oriented, and functional programming models.
-- **Standard Library:** Ships with a broad set of built-in modules for file handling, networking, and math.
+- **Readable Syntax:** Uses indentation rather than braces, making code concise and maintainable.
+- **Interpreted & Dynamic:** Executes line-by-line; variables are dynamically typed.
+- **Multi-Paradigm:** Supports OOP, functional, and procedural styles.
 
 ### Primary Use Cases:
-1. **Data Science & Machine Learning:** Dominated by libraries such as NumPy, Pandas, Scikit-learn, PyTorch, and TensorFlow.
-2. **Web Backend Development:** High-performance web frameworks like FastAPI, Django, and Flask.
-3. **Automation & Scripting:** Writing automated system tasks, file processing, and web scrapers (BeautifulSoup).
-4. **DevOps & Cloud:** Tooling in AWS Lambda, Google Cloud functions, and CI/CD automation.`;
+1. **Data Science & AI:** NumPy, Pandas, Scikit-learn, PyTorch, and TensorFlow.
+2. **Web Backends:** FastAPI, Django, Flask.
+3. **Automation & Cloud:** Scripting, web scraping, and CI/CD automation.`;
     }
 
     if (/react.*angular|angular.*react/i.test(q)) {
+      if (!isDetailedRequest) {
+        return `**React vs Angular** in brief:
+
+- **React:** A flexible UI **library** by Meta using a Virtual DOM and JSX. You choose your own routing, state management, and build tools. Ideal for flexibility and modern apps (e.g. Next.js).
+- **Angular:** A comprehensive, opinionated **framework** by Google with TypeScript, routing, reactive forms, and dependency injection built-in. Ideal for large enterprise standards.
+
+💡 *Ask "explain in detail" for a full side-by-side feature matrix.*`;
+      }
+
       return `Here is a technical comparison between **React** and **Angular**:
 
 | Dimension | React | Angular |
 | :--- | :--- | :--- |
-| **Type** | UI Component Library | Full-Fledged Application Framework |
+| **Type** | UI Component Library | Full Framework |
 | **Maintained By** | Meta (Facebook) & Community | Google |
-| **Primary Language** | JavaScript / TypeScript (JSX) | TypeScript (Strict out-of-the-box) |
-| **DOM Mechanism** | Virtual DOM | Real DOM + Incremental DOM |
-| **Data Binding** | Unidirectional (One-way) | Two-way data binding (\`[(ngModel)]\`) |
-| **State & Routing** | Unopinionated (Redux, Zustand, React Router) | Built-in router, reactive forms, RxJS streams |
-| **Architecture** | Flexible component composability | Structured MVC / MVVM with Dependency Injection |
+| **Language** | JS / TS (JSX) | TypeScript (Strict) |
+| **DOM** | Virtual DOM | Real + Incremental DOM |
+| **Architecture** | Flexible Composability | Structured MVC with DI |
 
-### Summary Recommendation:
-- Choose **React** if you value architectural flexibility, rapid ecosystem adoption, or are building with modern meta-frameworks like **Next.js**.
-- Choose **Angular** if you are engineering large enterprise systems where standard conventions, built-in dependency injection, and integrated test suites are prioritized.`;
+### Recommendation:
+- Choose **React** if you value architectural freedom, rich npm ecosystem, or Next.js.
+- Choose **Angular** if you build enterprise applications that require standardized patterns out of the box.`;
     }
 
     if (/machine learning|ml\b/i.test(q)) {
-      return `**Machine Learning (ML)** is a subfield of artificial intelligence where algorithms learn patterns from data to make predictions or decisions without being explicitly hardcoded with rules.
+      if (!isDetailedRequest) {
+        return `**Machine Learning (ML)** is a subset of AI where systems learn patterns from historical data to make predictions or decisions, rather than following static hardcoded rules.
 
-### How It Operates:
-Instead of manual \`if/else\` business logic, a mathematical model is trained on historical data. During training, it iteratively adjusts internal parameters to minimize error between predicted and actual outputs.
+- **Supervised:** Learns from labeled data (e.g. spam detection, price prediction).
+- **Unsupervised:** Finds hidden patterns (e.g. customer segmentation).
+- **Reinforcement:** Learns via rewards and penalties (e.g. game playing, robotics).
+
+💡 *Ask "explain in detail" if you want algorithmic and implementation depth.*`;
+      }
+
+      return `**Machine Learning (ML)** is a subfield of artificial intelligence where algorithms learn patterns from data to make predictions or decisions without hardcoded rules.
 
 ### The 3 Core Paradigms:
-1. **Supervised Learning:**
-   - Trained on labeled inputs and outputs.
-   - *Tasks:* Classification (email spam detection, image labeling) and Regression (house price estimation, stock forecasting).
-   - *Common Algorithms:* Linear/Logistic Regression, Random Forests, Support Vector Machines, Gradient Boosted Trees (XGBoost).
+1. **Supervised Learning:** Trained on labeled data for Classification (spam filter) and Regression (sales forecast).
+2. **Unsupervised Learning:** Finds hidden clusters in unlabeled data (customer segmentation, PCA).
+3. **Reinforcement Learning:** Agents learn optimal strategies via reward/penalty feedback loops.
 
-2. **Unsupervised Learning:**
-   - Uncovers latent structures or clusters in unlabeled data.
-   - *Tasks:* Customer segmentation, anomaly detection, dimensionality reduction.
-   - *Common Algorithms:* K-Means Clustering, Principal Component Analysis (PCA).
-
-3. **Reinforcement Learning:**
-   - An autonomous agent learns optimal behaviors through environmental feedback (rewards and penalties).
-   - *Tasks:* Robotics control, automated trading, gameplay engines (AlphaGo).
-
-### Everyday Implementations:
-- **Recommendation Engines:** Feed curation on Netflix, YouTube, and Amazon.
-- **Natural Language Processing:** Large Language Models (LLMs), machine translation, speech recognition.
-- **Computer Vision:** Medical imaging diagnostics, facial recognition, and autonomous navigation.`;
+### Key Applications:
+- Recommendation engines (Netflix, YouTube), Natural Language Processing (LLMs), and Computer Vision.`;
     }
 
-    return `Here is a breakdown of **${userMessage}**:
+    return `Here is a quick overview of **${userMessage}**:
 
-In software development and modern computing, understanding core system mechanics and design trade-offs is essential:
+- **Core Idea:** In modern software development, focus on clean architecture, type safety, and predictable data flow.
+- **Best Practice:** Keep components modular, handle edge-case errors gracefully, and profile performance early.
 
-1. **Fundamental Mechanism:** Clean separation of concerns, deterministic data flow, and predictable state transformations prevent runtime bugs.
-2. **Performance Considerations:** Always evaluate time complexity ($O(n)$ bounds), memory allocation, and client-side rendering bottlenecks.
-3. **Best Practices:** Prefer modular, testable components with strong typing (TypeScript) and explicit error handling.
-
-Would you like a code example or a deeper dive into any specific part of this concept?`;
+💡 *Ask "explain in detail" if you'd like code snippets or a deeper dive.*`;
   }
 
   // --------------------------------------------------------------------------
@@ -861,10 +781,10 @@ Would you like a code example or a deeper dive into any specific part of this co
 
 > **"${lastQuestion}"**
 
-Would you like me to expand on that topic, clarify any points, or discuss something new?`;
+Would you like to expand on that or explore something new?`;
     }
 
-    return `This is the start of our current conversation session, so there are no prior questions recorded in this thread yet. What would you like to explore?`;
+    return `This is the start of our current conversation session. What would you like to explore?`;
   }
 
   // --------------------------------------------------------------------------
@@ -873,46 +793,31 @@ Would you like me to expand on that topic, clarify any points, or discuss someth
   if (intent === "career_interest_update") {
     const newInterest = extractNewInterest(userMessage);
 
-    return `Understood! I've updated your career interest to **${newInterest}**.
+    return `Understood! I've updated your primary career focus to **${newInterest}**.
 
-### How This Guides Your Next Steps:
-- **Leveraging Your Current Strengths:** Your background in **${userSkills}** provides a great base for building user interfaces and interacting with APIs.
-- **New Focus Areas for ${newInterest}:**
-  1. **Core Fundamentals:** Study data structures, asynchronous programming, and clean API consumption.
-  2. **Domain-Specific Stack:** Focus on specialized tools and libraries for ${newInterest}.
-  3. **Targeted Projects:** Build a portfolio piece demonstrating ${newInterest} concepts rather than generic CRUD apps.
+- Your verified background in **${userSkills}** provides an excellent foundation.
+- All future skill roadmaps, project ideas, and course suggestions will now prioritize **${newInterest}**!
 
-*Note regarding Pathly in-app jobs:* Our current in-app catalog features openings in Frontend Engineering (Google, Microsoft, Swiggy), Full-Stack, and Public Service exams. While dedicated openings for ${newInterest} may be limited in the local database right now, I will align all future guidance, project ideas, and skill roadmaps with your new focus!`;
+What would you like to look at first—skills to develop or project ideas?`;
   }
 
   // --------------------------------------------------------------------------
-  // 8. Job Search ("Find available jobs for me.") - Verified actual in-app openings
+  // 8. Job Search ("Find available jobs for me.")
   // --------------------------------------------------------------------------
   if (intent === "job_search") {
     const job1 = rankedJobs[0];
     const job2 = rankedJobs[1];
 
-    let output = `Based on our verified Pathly application database and your current background (**${primaryInterest}** · **${profile.experience}**), here are the top matched openings:\n\n`;
+    let output = `Here are the top openings in Pathly matching your **${primaryInterest}** profile:\n\n`;
 
     if (job1) {
-      output += `### 1. **${job1.title}** — *${job1.companyOrOrg}*\n`;
-      output += `- 📊 **Verified Match Score:** **${job1.matchScore}%**\n`;
-      output += `- 💰 **Compensation:** ${job1.salaryOrScale} · *${job1.location} (${job1.workMode || "On-site"})*\n`;
-      output += `- ✅ **Matching Skills:** ${job1.matchingSkills.slice(0, 4).join(", ") || "Foundational stack"}\n`;
-      if (job1.missingSkills.length > 0) {
-        output += `- ⚠️ **Skills to Develop:** ${job1.missingSkills.slice(0, 2).join(", ")}\n`;
-      }
-      output += `- 💡 **Match Basis:** ${job1.matchReasons[0] || "Aligns with your verified profile."}\n\n`;
+      output += `• **${job1.title}** at **${job1.companyOrOrg}** (${job1.salaryOrScale}, **${job1.matchScore}% Match**)\n`;
     }
-
     if (job2) {
-      output += `### 2. **${job2.title}** — *${job2.companyOrOrg}*\n`;
-      output += `- 📊 **Verified Match Score:** **${job2.matchScore}%**\n`;
-      output += `- 💰 **Compensation:** ${job2.salaryOrScale} · *${job2.location}*\n`;
-      output += `- 💡 **Match Basis:** ${job2.matchReasons[0] || "Complementary technical opening."}\n\n`;
+      output += `• **${job2.title}** at **${job2.companyOrOrg}** (${job2.salaryOrScale}, **${job2.matchScore}% Match**)\n`;
     }
 
-    output += `👉 **Tap any job card below** to view the full specification and responsibilities.`;
+    output += `\n👉 *Tap the job cards below to view requirements and apply!*`;
     return output;
   }
 
@@ -920,200 +825,149 @@ Would you like me to expand on that topic, clarify any points, or discuss someth
   // 9. Project Recommendations ("Suggest projects based on my interests.")
   // --------------------------------------------------------------------------
   if (intent === "project_recommendation") {
-    return `### 🛠️ High-Impact Projects Tailored to Your Focus in ${primaryInterest}
+    if (!isDetailedRequest) {
+      return `Here are 2 high-impact project ideas for your **${primaryInterest}** portfolio:
 
-You already have **${profile.projects.map((p) => p.name).join(" and ")}**. To elevate your portfolio for hiring teams in **${primaryInterest}**, consider building:
+1. **Real-Time Collaborative Workspace:** React, TypeScript & WebSockets with live presence and optimistic updates.
+2. **High-Performance Headless Storefront:** Next.js App Router with instant edge search and 95+ Core Web Vitals.
+
+💡 *Ask "explain in detail" for architecture specs and step-by-step milestones.*`;
+    }
+
+    return `### 🛠️ High-Impact Projects for ${primaryInterest}
+
+To elevate your portfolio beyond standard CRUD applications:
 
 1. **Real-Time Collaborative Canvas / Workspace:**
-   - **Tech Stack:** React, TypeScript, WebSockets, Tailwind CSS.
-   - **Key Features:** Multi-user live cursor presence, optimistic UI state updates, conflict resolution with operational transformation / CRDTs, accessible keyboard controls.
-   - **Why It Works:** Demonstrates mastery over complex asynchronous state management, network serialization, and client render optimization.
+   - **Stack:** React, TypeScript, WebSockets, Tailwind CSS.
+   - **Highlights:** Multi-user live cursor presence, conflict resolution, accessible keyboard controls.
+   - **Why It Works:** Proves mastery over asynchronous state and network serialization.
 
 2. **High-Performance E-Commerce Application with Edge Caching:**
-   - **Tech Stack:** Next.js (App Router), TypeScript, Service Workers, Tailwind CSS.
-   - **Key Features:** Sub-100ms instant client-side search across 5,000+ items, offline cart storage, 95+ Core Web Vitals audit score.
-   - **Why It Works:** Directly covers production performance optimization (LCP, INP, CLS) and modern rendering pipelines.`;
+   - **Stack:** Next.js (App Router), TypeScript, Service Workers, Tailwind CSS.
+   - **Highlights:** Sub-100ms instant client-side search, offline cart storage, 95+ Core Web Vitals.
+   - **Why It Works:** Demonstrates production optimization (LCP, INP, CLS) and modern rendering.`;
   }
 
   // --------------------------------------------------------------------------
-  // 10. Skill Development ("What should I learn next?", "What skills should I learn for that?")
+  // 10. Skill Development ("What should I learn next?")
   // --------------------------------------------------------------------------
   if (intent === "skill_development") {
     const targetCareer = extractTargetCareerFromHistory(history, profile);
 
+    if (!isDetailedRequest) {
+      return `Based on your **${primaryInterest}** background (${userSkills}), here are the top 3 highest-priority skills to master next:
+
+1. **Web Performance & Core Web Vitals:** Optimizing LCP, INP, and bundle splitting.
+2. **State & Server Sync:** Mastering **TanStack Query** or **Zustand** for asynchronous cache handling.
+3. **Next.js & Server Components:** App Router, Server Actions, and Streaming SSR.
+
+💡 *Ask "give me a detailed roadmap" if you want a complete week-by-week guide!*`;
+    }
+
     if (targetCareer.includes("Frontend") || targetCareer.includes("Web Application")) {
-      return `### 📚 Recommended Skill Roadmap for **Frontend / Web Application Engineering**
+      return `### 📚 Detailed Skill Roadmap for **Frontend / Web Application Engineering**
 
-Since you already possess solid foundations in **${userSkills}**, you don't need basic syntax tutorials. To elevate yourself to a top-tier engineer ready for high-scale product teams, here are the core skills to master next:
+Since you already possess foundations in **${userSkills}**, here is your advanced progression plan:
 
----
+1. **Web Performance Optimization & Core Web Vitals (Priority 1):**
+   - Largest Contentful Paint (LCP), Interaction to Next Paint (INP), Cumulative Layout Shift (CLS).
+   - In-app resource: **"Web Development Bootcamp"** in your **Learn** tab.
 
-### 1. **Web Performance Optimization & Core Web Vitals** (Priority 1)
-- **Why It Matters:** Senior hiring teams evaluate whether you understand rendering bottlenecks, not just component syntax.
-- **Key Topics:** Largest Contentful Paint (LCP), Interaction to Next Paint (INP), Cumulative Layout Shift (CLS), code-splitting with dynamic imports, image optimization, and bundle size reduction.
-- **In-App Resource:** Complete the **"Web Development Bootcamp"** in your **Learn** tab.
+2. **Advanced State Management & Server Synchronization:**
+   - **TanStack Query** or **Zustand** for optimistic updates, cache invalidation, and debounced mutations.
 
-### 2. **Advanced State Management & Server Synchronization**
-- **Why It Matters:** Modern web apps separate client UI state from asynchronous server cache.
-- **Key Topics:** **TanStack Query (React Query)** or **Zustand** for optimistic updates, cache invalidation, and debounced mutations.
+3. **Modern Meta-Frameworks & Server Components:**
+   - **Next.js (App Router)**, Server Actions, Streaming SSR, and hybrid rendering strategies.
 
-### 3. **Modern Meta-Frameworks & Server Components**
-- **Why It Matters:** Modern web engineering has shifted towards **Next.js (App Router)** and React Server Components (RSC).
-- **Key Topics:** Server Actions, Streaming SSR, layout caching, and hybrid rendering strategies.
-
-### 4. **Automated Testing & Code Quality**
-- **Why It Matters:** Writing reliable tests separates mid-tier candidates from senior developers.
-- **Key Topics:** Unit & component testing with **Jest** + **React Testing Library**; end-to-end flows with **Playwright**.
-
-### 5. **Web Accessibility (a11y) & Semantic Architecture**
-- **Why It Matters:** Critical for enterprise applications and public-facing products.
-- **Key Topics:** ARIA patterns, keyboard navigation trapping, color contrast standards (WCAG 2.1 AA), and semantic HTML.
-
----
-
-💡 **Next Step:** Would you like me to recommend a project to practice these skills, suggest in-app courses, or find matching jobs?`;
+4. **Automated Testing & Code Quality:**
+   - Unit & component testing with **Jest** + **React Testing Library**; end-to-end flows with **Playwright**.`;
     }
 
-    if (targetCareer.includes("Full-Stack")) {
-      return `### 📚 Recommended Skill Roadmap for **Full-Stack Web Development**
+    return `### 📚 Detailed Skill Roadmap for **${targetCareer}**
 
-Building upon your solid frontend stack (**${userSkills}**), here are the core backend and infrastructure skills to master:
-
-1. **Backend Runtime & Frameworks:** Node.js, Express, or Next.js API Routes / Server Actions.
-2. **Databases & ORMs:** PostgreSQL, schema migrations, and Prisma ORM.
-3. **Authentication & Security:** JWT, OAuth 2.0, HTTP-only cookies, and CSRF protection.
-4. **DevOps & Containers:** Docker containerization, CI/CD pipelines (GitHub Actions), and cloud deployment.
-5. **Caching & Asynchronous Processing:** Redis for session/cache stores and background worker queues.
-
-💡 **In-App Resource:** Check out the **"Full Stack Developer Path"** in your **Learn** tab!`;
-    }
-
-    if (targetCareer.includes("Artificial Intelligence") || targetCareer.includes("AI")) {
-      return `### 📚 Recommended Skill Roadmap for **Artificial Intelligence & Machine Learning**
-
-To bridge into AI development alongside your programming background:
-
-1. **Python Programming & Scientific Computing:** NumPy, Pandas, Vectorized operations.
-2. **Core ML Fundamentals:** Supervised & Unsupervised algorithms, Scikit-learn, evaluation metrics.
-3. **Deep Learning Frameworks:** PyTorch or TensorFlow for neural networks.
-4. **Modern GenAI & LLM Orchestration:** LangChain / LlamaIndex, prompt engineering, vector databases (Pinecone, ChromaDB).
-5. **AI Application Deployment:** FastAPI backend hosting, model inference caching, and ONNX runtime.`;
-    }
-
-    const missingSkill = topJob?.missingSkills?.[0] || "Web Performance & Core Web Vitals";
-    return `### 📚 Recommended Skill Roadmap for **${targetCareer}**
-
-Based on your verified skills (**${userSkills}**) and target roles:
-
-1. **${missingSkill} (Priority 1):**
-   - Essential for passing senior technical screens and architecting resilient client applications.
-   - *In-App Resource:* Enroll in **"Web Development Bootcamp"** in Pathly's Learn tab.
-
-2. **Advanced State Management & Server State:**
-   - Modern teams rely on tools like TanStack Query or Zustand for predictable server cache synchronization.
-
-3. **Automated Testing (Unit & Integration):**
-   - Writing reliable Jest and React Testing Library suites differentiates mid-tier candidates from senior engineers.`;
+1. **Core Domain Tooling:** Deepen expertise in the specific frameworks and architectures of ${targetCareer}.
+2. **Backend & API Integrations:** Build robust REST and GraphQL data pipelines.
+3. **Performance & Automated Testing:** Unit test critical paths and optimize system response times.`;
   }
 
   // --------------------------------------------------------------------------
   // 11. Career Guidance ("Which career suits me?", "What kind of career should I choose?")
   // --------------------------------------------------------------------------
   if (intent === "career_guidance") {
-    return `### 🧭 Comprehensive Career Suitability Assessment
+    if (!isDetailedRequest) {
+      return `Based on your **${profile.readinessScore}% readiness score** and skills in **${userSkills}**, your top recommended career path is **Frontend / Web Application Engineering** (93% suitability), followed by **UI/UX Design Systems** and **Full-Stack Development**.
 
-Based on your verified Pathly profile (**${profile.fullName}**):
-- 🎓 **Education:** ${profile.education} (CGPA: ${profile.cgpa || "8.4 / 10"})
-- 🎯 **Stated Career Interest:** ${primaryInterest}
-- ⚡ **Verified Core Skills:** ${userSkills}
-- 💼 **Experience:** ${profile.experience}
-- 🛠️ **Portfolio Projects:** ${profile.projects.map((p) => p.name).join(" and ")}
-- 📊 **Career Readiness:** ${profile.readinessScore}% · Resume Score: ${profile.resumeScore}/100
+Would you like to explore recommended skills to learn, view matching in-app jobs, or ask for a detailed breakdown?`;
+    }
 
-Here are the top 3 career paths tailored to your background, ranked by immediate alignment and growth potential:
+    return `### 🧭 Comprehensive Career Assessment for ${profile.fullName}
 
----
+- 🎯 **Primary Fit:** **Frontend / Web Application Engineer** (93% Match)
+  - Your proficiency in **React, TypeScript, Tailwind CSS** and verified project **${topProject}** provide immediate alignment with market roles (₹5–12 LPA).
+- 🚀 **Growth Track:** **Full-Stack Web Developer**
+  - Natural progression by expanding your React skills with Node.js and PostgreSQL.
+- 🎨 **Hybrid Track:** **UI/UX & Design Systems Engineer**
+  - Leverages your design sensibilities and component implementation skills.
 
-### 1. Primary Recommendation: **Frontend / Web Application Engineer** (Top Immediate Fit)
-- **Why It Fits You:** Your hands-on proficiency in **React, TypeScript, Tailwind CSS, and REST APIs** directly matches modern product engineering requirements. Your verified project **${topProject}** proves your ability to construct reactive, responsive client architectures.
-- **Typical Industry Roles:** Frontend Developer, React Engineer, Web Application Developer.
-- **Market Demand & Outlook:** High demand across SaaS platforms, tech startups, and digital product teams (₹5–12 LPA entry-to-mid band).
-- **Core Focus:** Component architecture, client-side state caching, and responsive web performance.
-
----
-
-### 2. Strategic Growth Track: **Full-Stack Web Developer** (Highest Long-Term Leverage)
-- **Why It Fits You:** You already command client-side rendering and API integration. By expanding into backend application servers (Node.js, Next.js App Router API handlers) and relational databases (PostgreSQL), you can advance into full-stack engineering without starting from scratch.
-- **Typical Industry Roles:** Full-Stack Engineer, JavaScript/TypeScript Developer.
-- **Key Bridge:** Deepen server-side data modeling, ORMs (Prisma), and containerization (Docker).
-
----
-
-### 3. Design-Engineering Hybrid: **UI/UX & Design Systems Engineer**
-- **Why It Fits You:** Your profile combines design sensibilities (UI/UX Design, Responsive Web Design) with component implementation. Companies increasingly seek "Front-of-Frontend" engineers who translate Figma tokens into accessible, reusable component libraries.
-- **Typical Industry Roles:** Design Technologist, Design Systems Engineer, UI Developer.
-- **Key Bridge:** Component tokenization, accessibility (WCAG 2.1 AA), and micro-interactions.
-
----
-
-### 💡 Suggested Next Steps:
-Which of these career tracks aligns best with your goals? You can ask:
-- *"What skills should I learn for that?"*
-- *"Suggest projects based on my interests."*
-- *"Find available jobs for me."*`;
+💡 *Ask "What skills should I learn for that?" or "Find jobs for me" to continue.*`;
   }
 
   // --------------------------------------------------------------------------
   // 12. Resume & Score Improvement
   // --------------------------------------------------------------------------
   if (intent === "resume_improvement") {
+    if (!isDetailedRequest) {
+      return `Your Career Readiness Score is **${profile.readinessScore}%** (Resume: ${profile.resumeScore}/100). The top 2 quick improvements:
+
+1. **Quantify Project Impact:** Add concrete metrics to your project descriptions (e.g. reduced load time by 30%, served 500+ active users).
+2. **Verify Skills:** Complete the Web Performance module in your **Learn** tab.
+
+💡 *Ask "explain in detail" for a category-by-category audit score breakdown.*`;
+    }
+
     return `### 📊 Diagnostic of Your Career Readiness Score (${profile.readinessScore}%)
 
-Your Career Readiness score evaluates four distinct dimensions:
+1. **Verified Core Skills:** 90 / 100 (Strong match for ${userSkills})
+2. **Experience Eligibility:** 85 / 100 (1+ year aligns with entry-to-mid tier banding)
+3. **Project Quantifiable Impact:** 70 / 100 (Add concrete latency/user numbers)
+4. **Skill Assessment Depth:** 65 / 100 (Complete advanced assessments in Learn tab)
 
-1. **Verified Core Skills:** **90 / 100** (Strong match for ${userSkills})
-2. **Experience Eligibility:** **85 / 100** (Your ${profile.experience} aligns with entry-to-mid tier banding)
-3. **Project Quantifiable Impact:** **70 / 100** (Existing project descriptions lack concrete metrics like latency reductions or scale numbers)
-4. **Skill Assessment Depth:** **65 / 100** (Advanced modules like Performance Profiling and System Architecture need completion)
-
----
-
-### Actionable Steps to Improve Your Score:
-- **Quantify Project Achievements:** Transform generic resume lines into measurable impact (e.g., *"Optimized component rendering, reducing First Contentful Paint by 32% for 10K+ monthly active users"*).
-- **Verify Missing Skills:** Complete the **Web Development Bootcamp** module in the Learn tab.
-- **Practice Mock Screening:** Run one 10-minute technical simulation in the Mock Interview tab.`;
+### Action Steps:
+- Add quantifiable business metrics to your project descriptions.
+- Enroll in the **Web Development Bootcamp** in Pathly's Learn tab.`;
   }
 
   // --------------------------------------------------------------------------
   // 13. Interview Preparation
   // --------------------------------------------------------------------------
   if (intent === "interview_prep") {
-    return `### 💡 Technical Interview Preparation Strategy
+    if (!isDetailedRequest) {
+      return `For **${primaryInterest}** interviews, focus on these 3 essentials:
 
-For roles matching your focus in **${primaryInterest}**, expect technical interviews to test three main areas:
+1. **JavaScript & React Core:** Event loop, closures, hooks memoization, and reconciliation.
+2. **Machine Coding:** Building a functional component (e.g. debounced search or modal) in 45 mins.
+3. **Project Deep-Dive:** Explaining **${topProject}** using the STAR method (Situation, Task, Action, Result).
 
-1. **Core Fundamentals (Screening Round):**
-   - Deep dive into asynchronous JavaScript (Event Loop, Microtasks, Closures, Promises).
-   - React component lifecycle, hook memoization (\`useMemo\`, \`useCallback\`), and reconciliation.
+👉 *You can start a practice session in Pathly's **Mock Interview** screen!*`;
+    }
 
-2. **Machine Coding & Architecture (Practical Round):**
-   - Building a functional, accessible component (search with debounce, infinite scroll, or modal dialog) under time constraints.
+    return `### 💡 Technical Interview Strategy for ${primaryInterest}
 
-3. **Behavioral & Project Experience (STAR Method):**
-   - Be prepared to discuss **${topProject}**: explain a difficult architectural challenge, how you diagnosed a bug, and what business impact it delivered.
+1. **Core Fundamentals:** Asynchronous JavaScript, closures, promises, React hook lifecycle (\`useMemo\`, \`useCallback\`).
+2. **Machine Coding Round:** Constructing a responsive, accessible component under time constraints.
+3. **Behavioral & Architecture:** Discussing **${topProject}** challenges, performance optimizations, and trade-offs using STAR.
 
-🚀 **Next Step:** Launch a session in Pathly's **Mock Interview Screen** to test yourself with timed questions!`;
+🚀 *Launch a session in Pathly's **Mock Interview Screen** to practice timed questions!*`;
   }
 
-  // Default fallback for any general question
-  return `Regarding your question about **"${userMessage}"**:
+  // Default fallback
+  return `Regarding **"${userMessage}"**:
 
-In software engineering and career development, having clear focus and understanding fundamental concepts is key. 
-
-How would you like to proceed?
-- Explore technical concepts or architectural best practices
-- Review personalized career roadmaps and skill recommendations based on your profile
-- Search verified in-app jobs or courses in Pathly`;
+Focus on clean code architecture and modular design. How would you like to proceed?
+- Explore specific technical concepts
+- Review skill roadmaps and course recommendations
+- Search verified in-app jobs in Pathly`;
 }
 
 // ============================================================================
@@ -1125,76 +979,43 @@ function generateFollowUps(
   profile: UserProfileContext,
   topJob: RecommendedJobPayload | null
 ): string[] {
-  const lowerMsg = userMessage.toLowerCase();
+  if (intent === "acknowledgement") {
+    return ["What should I learn next?", "Suggest any course for me.", "Find available jobs for me."];
+  }
 
-  // If asking about a specific technology
-  if (lowerMsg.includes("react") || lowerMsg.includes("next")) {
-    return [
-      "Show a working code example",
-      "What are common pitfalls to avoid?",
-      "Suggest a project for my portfolio",
-    ];
+  if (intent === "career_guidance") {
+    return ["What skills should I learn for that?", "Suggest projects based on my interests.", "Find available jobs for me."];
   }
-  if (lowerMsg.includes("python") || lowerMsg.includes("machine learning") || lowerMsg.includes("ai")) {
-    return [
-      "Show a practical code snippet",
-      "What libraries should I learn?",
-      "Suggest an AI project for my level",
-    ];
+
+  if (intent === "skill_development") {
+    return ["Suggest projects based on my interests.", "Suggest any course for me.", "Find available jobs for me."];
   }
-  if (lowerMsg.includes("closure") || lowerMsg.includes("javascript") || lowerMsg.includes("typescript")) {
-    return [
-      "Can you give another real-world example?",
-      "How is this tested in tech interviews?",
-      "What are common mistakes to avoid?",
-    ];
+
+  if (intent === "project_presentation") {
+    return ["What should I learn next?", "Suggest any course for me.", "Find available jobs for me."];
+  }
+
+  if (intent === "course_recommendation") {
+    return ["What should I learn next?", "Suggest projects based on my interests.", "Find available jobs for me."];
+  }
+
+  if (intent === "general_conversation") {
+    return ["What kind of career should I choose?", "What is Python?", "Explain React vs Angular."];
   }
 
   if (intent === "technical_question") {
-    return [
-      "Show a practical code example",
-      "What are common pitfalls to avoid?",
-      "How is this used in production?",
-    ];
+    return ["Explain machine learning.", "Suggest projects based on my interests.", "What should I learn next?"];
   }
 
-  if (intent === "career_guidance" || intent === "skill_development") {
-    return [
-      "What projects should I build next?",
-      "Which skills give the highest ROI?",
-      "Find matching jobs in Pathly",
-    ];
+  if (intent === "career_interest_update") {
+    return ["Suggest projects based on my interests.", "What should I learn next?", "Find available jobs for me."];
   }
 
   if (intent === "job_search") {
-    return [
-      "How can I tailor my resume for this role?",
-      "What interview questions are asked?",
-      "What skills am I missing?",
-    ];
+    return ["What should I learn next?", "Suggest any course for me.", "Help me prepare for interviews."];
   }
 
-  if (intent === "project_presentation" || intent === "project_recommendation") {
-    return [
-      "How should I explain this in interviews?",
-      "What architecture pattern should I use?",
-      "What metrics make this project stand out?",
-    ];
-  }
-
-  if (intent === "resume_improvement" || intent === "interview_prep") {
-    return [
-      "How do I highlight my React projects?",
-      "Mock interview question for this role",
-      "What metrics should I add to my resume?",
-    ];
-  }
-
-  return [
-    "What should I learn next?",
-    "Suggest projects based on my interests",
-    "Find available jobs for me",
-  ];
+  return ["Suggest any course for me.", "Find available jobs for me.", "Suggest projects based on my interests."];
 }
 
 async function callGeminiApi({

@@ -4,16 +4,20 @@ import React from "react";
 import { useRouter } from "next/navigation";
 import { AiCoachScreen } from "@/components/screens/AiCoachScreen";
 
-export default function AiPage() {
+export default function AiChatPage() {
   const router = useRouter();
 
   return (
-    <div className="w-full h-screen bg-[#FAF9FF]">
-      <AiCoachScreen
-        onBack={() => router.back()}
-        onSelectJob={(jobId) => router.push(`/dashboard?job=${jobId}`)}
-        onSelectCourse={(courseId) => router.push(`/dashboard?course=${courseId}`)}
-      />
+    <div className="w-full min-h-screen bg-[#FAF9FF] flex justify-center">
+      <div className="w-full max-w-[430px] min-h-screen bg-white shadow-lg flex flex-col">
+        <AiCoachScreen
+          onBack={() => router.back()}
+          onNavigateToTab={(tab) => {
+            if (tab === "home") router.push("/dashboard");
+            else router.push(`/dashboard?tab=${tab}`);
+          }}
+        />
+      </div>
     </div>
   );
 }

@@ -1,30 +1,23 @@
 "use client";
 
 import React, { useState, useRef, useEffect } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import {
   Sparkles,
   Send,
-  Square,
-  Copy,
-  Check,
-  RotateCcw,
   ThumbsUp,
   ThumbsDown,
-  Plus,
-  Trash2,
-  Settings,
-  PanelLeftClose,
-  PanelLeftOpen,
-  MessageSquare,
-  Compass,
-  Code2,
+  AlertCircle,
+  ArrowLeft,
+  RotateCcw,
   Briefcase,
-  GraduationCap,
+  BookOpen,
   ArrowRight,
-  User,
-  Clock,
-  Loader2,
   ChevronRight,
+  Zap,
+  Copy,
+  Check,
+  Sliders,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -33,32 +26,7 @@ import {
   UserProfileContext,
   DEFAULT_USER_PROFILE,
 } from "@/lib/userProfile";
-import { ChatMarkdownRenderer } from "@/components/ai-chat/ChatMarkdownRenderer";
-import { ChatSettingsModal } from "@/components/ai-chat/ChatSettingsModal";
-import { ChatMarkdownRenderer } from "@/components/ai-chat/ChatMarkdownRenderer";
-
-export interface ChatMessage {
-  id: string;
-  sender: "user" | "ai";
-  text: string;
-  timestamp: Date;
-  isStreaming?: boolean;
-  feedback?: "up" | "down" | null;
-}
-
-export interface ConversationSession {
-  id: string;
-  title: string;
-  createdAt: string;
-  updatedAt: string;
-  messages: {
-    id: string;
-    sender: "user" | "ai";
-    text: string;
-    timestamp: string;
-    feedback?: "up" | "down" | null;
-  }[];
-}
+import { RecommendedJobPayload, RecommendedCoursePayload } from "@/app/api/chat/route";
 
 interface AiCoachScreenProps {
   onBack?: () => void;
@@ -67,30 +35,21 @@ interface AiCoachScreenProps {
   onNavigateToTab?: (tab: "home" | "jobs" | "learn" | "ai" | "profile") => void;
 }
 
-const STORAGE_CONVERSATIONS_KEY = "pathly_ai_conversations_v2";
-const STORAGE_ACTIVE_ID_KEY = "pathly_ai_active_conv_id_v2";
+interface ChatMessage {
+  id: string;
+  sender: "ai" | "user";
+  text: string;
+  timestamp: Date;
+  recommendedJobs?: RecommendedJobPayload[];
+  recommendedCourses?: RecommendedCoursePayload[];
+  feedback?: "up" | "down" | null;
+}
 
-const SUGGESTED_STARTERS = [
-  {
-    icon: Code2,
-    title: "Technical Explanations",
-    prompt: "Explain how React Server Components work and when to use them.",
-  },
-  {
-    icon: Briefcase,
-    title: "Job Opportunities",
-    prompt: "Find genuine Frontend Developer openings in Chennai or Bangalore.",
-  },
-  {
-    icon: GraduationCap,
-    title: "Career Transition",
-    prompt: "What skills should I learn to transition from Frontend into Full Stack AI development?",
-  },
-  {
-    icon: Compass,
-    title: "Interview Preparation",
-    prompt: "Conduct a realistic mock interview for a Frontend Engineer position.",
-  },
+const INTEREST_PRESETS = [
+  { id: "frontend", label: "💻 Frontend & Web", interest: "Frontend Development" },
+  { id: "uiux", label: "🎨 UI/UX & Design", interest: "UI/UX" },
+  { id: "tech", label: "☁️ Technology", interest: "Technology" },
+  { id: "govt", label: "🏛️ Govt & TNPSC", interest: "Government Jobs" },
 ];
 
 export function AiCoachScreen({
@@ -100,686 +59,500 @@ export function AiCoachScreen({
   onNavigateToTab,
 }: AiCoachScreenProps) {
   const [userProfile, setUserProfile] = useState<UserProfileContext>(DEFAULT_USER_PROFILE);
-  const [conversations, setConversations] = useState<ConversationSession[]>([]);
-  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [inputValue, setInputValue] = useState("");
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [currentStatus, setCurrentStatus] = useState<string | null>(null);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [showProfileDrawer, setShowProfileDrawer] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([
+    {
+      id: "welcome",
+      sender: "ai",
+      text: `Hello ${DEFAULT_USER_PROFILE.fullName}! 👋 I'm your **Pathly AI Assistant**.
 
-  // 1. Load User Profile and Conversations from localStorage
-  useEffect(() => {
-    setUserProfile(loadUserProfile());
+I'm aligned with your **${DEFAULT_USER_PROFILE.interests[0]}** track and skills in **${DEFAULT_USER_PROFILE.skills.slice(0, 3).join(", ")}**.
 
-    try {
-      const savedConvs = localStorage.getItem(STORAGE_CONVERSATIONS_KEY);
-      if (savedConvs) {
-        const parsed: ConversationSession[] = JSON.parse(savedConvs);
-        setConversations(parsed);
+Ask me any technical question, or request personalized advice on skills, courses, or jobs!`,
+      timestamp: new Date(),
+    },
+  ]);
 
-        const savedActiveId = localStorage.getItem(STORAGE_ACTIVE_ID_KEY);
-        const active = parsed.find((c) => c.id === savedActiveId) || parsed[0];
-        if (active) {
-          setActiveConversationId(active.id);
-          setMessages(
-            active.messages.map((m) => ({
-              ...m,
-              timestamp: new Date(m.timestamp),
-            }))
-          );
-        }
-      }
-    } catch (e) {
-      console.error("Failed to load saved conversations", e);
-    }
-  }, []);
+  const [suggestedPrompts, setSuggestedPrompts] = useState<string[]>([
+    "Suggest any course for me.",
+    "What should I learn next?",
+    "Suggest projects based on my interests.",
+    "Find available jobs for me.",
+  ]);
 
   const [inputValue, setInputValue] = useState("");
   const [isTyping, setIsTyping] = useState(false);
-  const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
-  // 3. Auto-expand textarea height
+  // Load user profile on mount
   useEffect(() => {
-    const el = textareaRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    const nextHeight = Math.min(el.scrollHeight, 180);
-    el.style.height = `${Math.max(44, nextHeight)}px`;
-  }, [inputValue]);
+    const loaded = loadUserProfile();
+    const cleanInterests =
+      loaded.interests && loaded.interests.length > 0 && !loaded.interests[0].includes("Business")
+        ? [loaded.interests[0]]
+        : DEFAULT_USER_PROFILE.interests;
+    const sanitized = { ...DEFAULT_USER_PROFILE, ...loaded, interests: cleanInterests };
+    setUserProfile(sanitized);
+  }, []);
 
-  // 4. Save active conversation whenever messages change (and generation is idle)
+  // Auto-scroll to bottom of chat
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isTyping, streamingMessageId]);
+  }, [messages, isTyping]);
 
+  const handleCopyText = async (id: string, text: string) => {
     try {
-      const convId = activeConversationId || "conv-" + Date.now();
-      const firstUserMsg = messages.find((m) => m.sender === "user")?.text || "New Conversation";
-      const derivedTitle =
-        firstUserMsg.length > 38 ? firstUserMsg.slice(0, 38).trim() + "..." : firstUserMsg;
-
-      const serializedMessages = messages.map((m) => ({
-        id: m.id,
-        sender: m.sender,
-        text: m.text,
-        timestamp: m.timestamp.toISOString(),
-        feedback: m.feedback,
-      }));
-
-      setConversations((prev) => {
-        const existingIdx = prev.findIndex((c) => c.id === convId);
-        let updatedList: ConversationSession[];
-        if (existingIdx >= 0) {
-          updatedList = [...prev];
-          updatedList[existingIdx] = {
-            ...updatedList[existingIdx],
-            title: updatedList[existingIdx].title || derivedTitle,
-            updatedAt: new Date().toISOString(),
-            messages: serializedMessages,
-          };
-        } else {
-          updatedList = [
-            {
-              id: convId,
-              title: derivedTitle,
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-              messages: serializedMessages,
-            },
-            ...prev,
-          ];
-        }
-        localStorage.setItem(STORAGE_CONVERSATIONS_KEY, JSON.stringify(updatedList));
-        return updatedList;
-      });
-
-      if (!activeConversationId) {
-        setActiveConversationId(convId);
-        localStorage.setItem(STORAGE_ACTIVE_ID_KEY, convId);
+      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else if (typeof document !== "undefined") {
+        const textArea = document.createElement("textarea");
+        textArea.value = text;
+        textArea.style.position = "fixed";
+        textArea.style.opacity = "0";
+        document.body.appendChild(textArea);
+        textArea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textArea);
       }
-    } catch (e) {
-      console.error("Failed to persist conversation", e);
-    }
-  }, [messages, isGenerating, activeConversationId]);
-
-  // Create a new blank conversation
-  const handleNewChat = () => {
-    if (isGenerating && abortControllerRef.current) {
-      abortControllerRef.current.abort();
-    }
-    setIsGenerating(false);
-    setCurrentStatus(null);
-    setMessages([]);
-    const newId = "conv-" + Date.now();
-    setActiveConversationId(newId);
-    localStorage.setItem(STORAGE_ACTIVE_ID_KEY, newId);
-    setInputValue("");
-    setIsSidebarOpen(false);
-  };
-
-  // Switch to an existing conversation
-  const handleSelectConversation = (conv: ConversationSession) => {
-    if (isGenerating && abortControllerRef.current) {
-      abortControllerRef.current.abort();
-    }
-    setIsGenerating(false);
-    setCurrentStatus(null);
-    setActiveConversationId(conv.id);
-    localStorage.setItem(STORAGE_ACTIVE_ID_KEY, conv.id);
-    setMessages(
-      conv.messages.map((m) => ({
-        ...m,
-        timestamp: new Date(m.timestamp),
-      }))
-    );
-    setIsSidebarOpen(false);
-  };
-
-  // Delete a conversation
-  const handleDeleteConversation = (e: React.MouseEvent, convId: string) => {
-    e.stopPropagation();
-    const updated = conversations.filter((c) => c.id !== convId);
-    setConversations(updated);
-    localStorage.setItem(STORAGE_CONVERSATIONS_KEY, JSON.stringify(updated));
-
-    if (activeConversationId === convId) {
-      if (updated.length > 0) {
-        handleSelectConversation(updated[0]);
-      } else {
-        handleNewChat();
-      }
+      setCopiedId(id);
+      setTimeout(() => {
+        setCopiedId((prev) => (prev === id ? null : prev));
+      }, 2000);
+    } catch (err) {
+      console.error("Failed to copy:", err);
     }
   };
 
-  // Clear all conversations
-  const handleClearAllHistory = () => {
-    localStorage.removeItem(STORAGE_CONVERSATIONS_KEY);
-    localStorage.removeItem(STORAGE_ACTIVE_ID_KEY);
-    setConversations([]);
-    handleNewChat();
-  };
+  const handleSend = async (overrideText?: string) => {
+    const msgText = (overrideText || inputValue).trim();
+    if (!msgText || isTyping) return;
 
-  // Send message and stream response from Groq
-  const handleSend = async (overridePrompt?: string) => {
-    const textToSend = (overridePrompt || inputValue).trim();
-    if (!textToSend || isGenerating) return;
-
-    const userMsgId = "user-" + Date.now();
-    const aiMsgId = "ai-" + (Date.now() + 1);
-
-    const newUserMessage: ChatMessage = {
-      id: userMsgId,
+    const userMsg: ChatMessage = {
+      id: `user-${Date.now()}`,
       sender: "user",
-      text: textToSend,
+      text: msgText,
       timestamp: new Date(),
     };
 
-    const aiMsgId = `ai-${Date.now()}`;
-    const initialAiMsg: ChatMessage = {
-      id: aiMsgId,
-      sender: "ai",
-      text: "",
-      timestamp: new Date(),
-      recommendedJobs: [],
-      recommendedCourses: [],
-    };
-
-    setMessages((prev) => [...prev, userMsg, initialAiMsg]);
+    setMessages((prev) => [...prev, userMsg]);
     setInputValue("");
-    setIsGenerating(true);
-    setCurrentStatus("Thinking...");
-    setStreamingMessageId(aiMsgId);
+    setIsTyping(true);
 
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
+    const startTime = Date.now();
 
     try {
-      const historyPayload = messages.map((m) => ({ sender: m.sender, text: m.text }));
-
-      const res = await fetch("/api/chat", {
+      const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: msgText,
-          history: messages.slice(-16).map((m) => ({
+          history: messages.slice(-20).map((m) => ({
             sender: m.sender,
             text: m.text,
           })),
           userProfile,
-          stream: true,
         }),
-        signal: controller.signal,
       });
 
-      if (!res.ok) {
-        const errorText = await res.text();
-        let message = `API Error (${res.status})`;
-        try {
-          const errObj = JSON.parse(errorText);
-          message = errObj.error || message;
-        } catch { }
-        throw new Error(message);
+      const data = await response.json();
+
+      // Ensure a natural, deliberative thinking duration (~2200ms)
+      const MIN_THINKING_MS = 2200;
+      const elapsed = Date.now() - startTime;
+      if (elapsed < MIN_THINKING_MS) {
+        await new Promise((resolve) => setTimeout(resolve, MIN_THINKING_MS - elapsed));
       }
 
-      const contentType = response.headers.get("Content-Type") || "";
+      // If backend updated profile (e.g. user said "I am more interested in AI"), persist it
+      if (data.updatedProfile) {
+        setUserProfile(data.updatedProfile);
+        saveUserProfile(data.updatedProfile);
+      }
 
-      // Check if real-time streaming response
-      if (contentType.includes("text/event-stream") && response.body) {
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let accumulatedText = "";
-        let buffer = "";
+      const aiResponse: ChatMessage = {
+        id: `ai-${Date.now()}`,
+        sender: "ai",
+        text: data.response || "I have analyzed your request.",
+        timestamp: new Date(),
+        recommendedJobs: data.recommendedJobs || [],
+        recommendedCourses: data.recommendedCourses || [],
+      };
 
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
+      setMessages((prev) => [...prev, aiResponse]);
 
-          buffer += decoder.decode(value, { stream: true });
-          const parts = buffer.split("\n\n");
-          buffer = parts.pop() || "";
-
-          for (const part of parts) {
-            const trimmed = part.trim();
-            if (!trimmed.startsWith("data: ")) continue;
-            const dataStr = trimmed.slice(6);
-
-            try {
-              const event = JSON.parse(dataStr);
-              if (event.type === "meta") {
-                if (event.updatedProfile) {
-                  setUserProfile(event.updatedProfile);
-                  saveUserProfile(event.updatedProfile);
-                }
-                if (
-                  event.suggestedFollowUps &&
-                  Array.isArray(event.suggestedFollowUps) &&
-                  event.suggestedFollowUps.length > 0
-                ) {
-                  setSuggestedPrompts(event.suggestedFollowUps);
-                }
-                setMessages((prev) =>
-                  prev.map((m) =>
-                    m.id === aiMsgId
-                      ? {
-                          ...m,
-                          recommendedJobs: event.recommendedJobs || m.recommendedJobs,
-                          recommendedCourses: event.recommendedCourses || m.recommendedCourses,
-                        }
-                      : m
-                  )
-                );
-              } else if (event.type === "token" && event.content) {
-                accumulatedText += event.content;
-                setMessages((prev) =>
-                  prev.map((m) =>
-                    m.id === aiMsgId ? { ...m, text: accumulatedText } : m
-                  )
-                );
-              } else if (event.type === "done") {
-                break;
-              }
-            } catch {
-              // Ignore partial JSON chunks
-            }
-          }
-        }
-      } else {
-        // Fallback for standard JSON response
-        const data = await response.json();
-        if (data.updatedProfile) {
-          setUserProfile(data.updatedProfile);
-          saveUserProfile(data.updatedProfile);
-        }
-        if (data.suggestedFollowUps && Array.isArray(data.suggestedFollowUps)) {
-          setSuggestedPrompts(data.suggestedFollowUps);
-        }
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === aiMsgId
-              ? {
-                  ...m,
-                  text: data.response || "I have analyzed your request.",
-                  recommendedJobs: data.recommendedJobs || [],
-                  recommendedCourses: data.recommendedCourses || [],
-                }
-              : m
-          )
-        );
+      if (data.suggestedFollowUps && Array.isArray(data.suggestedFollowUps) && data.suggestedFollowUps.length > 0) {
+        setSuggestedPrompts(data.suggestedFollowUps);
       }
     } catch (err) {
       console.error("Chat error:", err);
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === aiMsgId
-            ? {
-                ...m,
-                text:
-                  m.text.trim() ||
-                  `I apologize, but I encountered a momentary connection issue. Please feel free to ask again!`,
-              }
-            : m
-        )
-      );
-    } finally {
-      setIsGenerating(false);
-      setCurrentStatus(null);
-      abortControllerRef.current = null;
-      setMessages((prev) =>
-        prev.map((m) => (m.id === aiMsgId ? { ...m, isStreaming: false } : m))
-      );
-      setStreamingMessageId(null);
-    }
-  };
-
-  // Stop Generation
-  const handleStop = () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-    }
-    setIsGenerating(false);
-    setCurrentStatus(null);
-    setMessages((prev) => prev.map((m) => (m.isStreaming ? { ...m, isStreaming: false } : m)));
-  };
-
-  // Regenerate last AI response
-  const handleRegenerate = () => {
-    if (isGenerating) return;
-    const lastUserMsg = [...messages].reverse().find((m) => m.sender === "user");
-    if (!lastUserMsg) return;
-
-    // Remove the last AI response from UI
-    setMessages((prev) => {
-      const copy = [...prev];
-      if (copy[copy.length - 1]?.sender === "ai") {
-        copy.pop();
+      const elapsed = Date.now() - startTime;
+      if (elapsed < 1500) {
+        await new Promise((resolve) => setTimeout(resolve, 1500 - elapsed));
       }
-      return copy;
-    });
-
-    handleSend(lastUserMsg.text);
-  };
-
-  // Copy message text
-  const handleCopy = async (id: string, text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopiedId(id);
-      setTimeout(() => setCopiedId(null), 2000);
-    } catch (e) {
-      console.error("Failed to copy text", e);
+      const fallbackAiResponse: ChatMessage = {
+        id: `ai-err-${Date.now()}`,
+        sender: "ai",
+        text: `I apologize, but I encountered a momentary issue processing your request. Please try asking again, or explore your career path for ${userProfile.interests[0]}.`,
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, fallbackAiResponse]);
+    } finally {
+      setIsTyping(false);
     }
   };
 
-  // Feedback up/down
-  const handleFeedback = (id: string, direction: "up" | "down") => {
+  const handleInterestSwitch = (newInterest: string) => {
+    const updated = saveUserProfile({
+      interests: [newInterest],
+    });
+    setUserProfile(updated);
+    setShowProfileDrawer(false);
+
+    // Send proactive prompt to AI
+    handleSend(`I want to explore careers and jobs in ${newInterest}. What matches my background?`);
+  };
+
+  const handleFeedback = (messageId: string, type: "up" | "down") => {
     setMessages((prev) =>
       prev.map((m) =>
-        m.id === id ? { ...m, feedback: m.feedback === direction ? null : direction } : m
+        m.id === messageId ? { ...m, feedback: m.feedback === type ? null : type } : m
       )
     );
   };
 
-  // Keydown handler: Enter to send, Shift+Enter for newline
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
+  const handleResetChat = () => {
+    setMessages([
+      {
+        id: "welcome-reset",
+        sender: "ai",
+        text: `Chat reset. Ready to assist you with technical inquiries, project advice, or career questions!`,
+        timestamp: new Date(),
+      },
+    ]);
+    setSuggestedPrompts([
+      "Suggest any course for me.",
+      "What should I learn next?",
+      "Suggest projects based on my interests.",
+      "Find available jobs for me.",
+    ]);
   };
 
-  const activeConvTitle =
-    conversations.find((c) => c.id === activeConversationId)?.title || "New Conversation";
-
   return (
-    <div className="flex h-full w-full bg-[#F8FAFC] text-slate-800 overflow-hidden relative font-sans">
-      {/* ===================================================================== */}
-      {/* 1. MINIMAL NAVIGATION SIDEBAR (Collapsible / Slide-over on mobile)   */}
-      {/* ===================================================================== */}
-      {/* Mobile Backdrop */}
-      {isSidebarOpen && (
-        <div
-          onClick={() => setIsSidebarOpen(false)}
-          className="fixed inset-0 bg-slate-900/30 backdrop-blur-xs z-30 md:hidden"
-        />
-      )}
-
-      <aside
-        className={cn(
-          "bg-white border-r border-slate-200/90 flex flex-col z-40 transition-all duration-200 ease-in-out",
-          // Desktop behavior
-          "hidden md:flex md:w-[260px] md:static md:translate-x-0 shrink-0",
-          // Mobile drawer behavior
-          isSidebarOpen && "!flex fixed inset-y-0 left-0 w-[280px] shadow-2xl"
-        )}
-      >
-        {/* Brand & New Chat */}
-        <div className="p-3.5 border-b border-slate-100 flex flex-col gap-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <div className="w-7 h-7 rounded-lg bg-blue-600 flex items-center justify-center text-white shadow-xs">
-                <Sparkles className="w-4 h-4" />
-              </div>
-              <span className="font-bold text-[14.5px] text-slate-900 tracking-tight">
-                Pathly AI
-              </span>
+    <div className="h-full w-full max-w-full bg-[#FAF9FF] flex flex-col relative overflow-hidden">
+      {/* Header */}
+      <div className="shrink-0 bg-white border-b border-[#E8E5F2] px-3 sm:px-4 py-2 sm:py-2.5 shadow-xs z-20">
+        <div className="flex items-center justify-between gap-2 max-w-full">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
+            {onBack && (
+              <button
+                type="button"
+                onClick={onBack}
+                className="p-1 rounded-full hover:bg-slate-100 text-[#667085] transition-colors shrink-0"
+                aria-label="Back"
+              >
+                <ArrowLeft className="w-4 h-4 stroke-[1.8]" />
+              </button>
+            )}
+            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#635BFF] to-[#8B5CF6] flex items-center justify-center shadow-xs shrink-0">
+              <Sparkles className="w-4 h-4 text-white" />
             </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <h1 className="text-[13px] sm:text-[14px] font-bold text-[#172033] truncate">
+                  AI Career Assistant
+                </h1>
+                <span className="text-[9px] font-semibold bg-[#EEF2FF] text-[#635BFF] px-1.5 py-0.2 rounded-full border border-[#C7D2FE] shrink-0">
+                  Groq LPU
+                </span>
+              </div>
+              <p className="text-[10px] text-[#667085] truncate">
+                Tailored for {userProfile.fullName}
+              </p>
+            </div>
+          </div>
 
+          {/* Action buttons */}
+          <div className="flex items-center gap-1 shrink-0">
             <button
-              onClick={() => setIsSidebarOpen(false)}
-              className="p-1 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 md:hidden"
-              title="Close sidebar"
+              type="button"
+              onClick={() => setShowProfileDrawer(!showProfileDrawer)}
+              className={cn(
+                "px-2 py-1 rounded-lg border transition-all flex items-center gap-1 text-[10.5px] font-medium shrink-0",
+                showProfileDrawer
+                  ? "bg-[#635BFF] text-white border-[#635BFF]"
+                  : "bg-white text-[#475569] border-[#E2E8F0] hover:bg-slate-50"
+              )}
+              title="Career Track Selector"
             >
-              <PanelLeftClose className="w-4 h-4" />
+              <Sliders className="w-3 h-3" />
+              <span>Track</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleResetChat}
+              className="p-1.5 rounded-lg text-[#667085] hover:text-[#172033] hover:bg-slate-100 transition-colors shrink-0"
+              title="Reset Chat"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
             </button>
           </div>
-
-          <button
-            onClick={handleNewChat}
-            className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold shadow-xs hover:border-slate-300 transition-all"
-          >
-            <Plus className="w-3.5 h-3.5 text-blue-600" />
-            <span>New Chat</span>
-          </button>
         </div>
 
-        {/* Conversation History List */}
-        <div className="flex-1 overflow-y-auto p-2 space-y-1">
-          <div className="px-2.5 py-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
-            <Clock className="w-3 h-3" />
-            Recent Chats
+        {/* Focus Banner */}
+        <div className="mt-2 flex items-center justify-between gap-2 bg-[#F8FAFC] border border-[#E2E8F0] rounded-lg px-2.5 py-1 text-[10.5px]">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className="text-[9.5px] font-semibold text-[#64748B] uppercase tracking-wider shrink-0">
+              Track:
+            </span>
+            <span className="font-bold text-[#635BFF] truncate">
+              {userProfile.interests[0] || "Frontend Development"}
+            </span>
           </div>
+          <span className="font-semibold text-[#059669] bg-[#D1FAE5] px-1.5 py-0.5 rounded text-[9.5px] shrink-0">
+            {userProfile.readinessScore}% Match
+          </span>
+        </div>
+      </div>
 
-          {conversations.length === 0 ? (
-            <div className="px-3 py-6 text-center text-xs text-slate-400">
-              No previous chats yet
-            </div>
-          ) : (
-            conversations.map((conv) => {
-              const isActive = conv.id === activeConversationId;
-              return (
-                <div
-                  key={conv.id}
-                  onClick={() => handleSelectConversation(conv)}
-                  className={cn(
-                    "group flex items-center justify-between px-2.5 py-2 rounded-lg text-xs cursor-pointer transition-all",
-                    isActive
-                      ? "bg-blue-50/80 text-blue-900 font-medium"
-                      : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
-                  )}
-                >
-                  <div className="flex items-center gap-2 overflow-hidden pr-1">
-                    <MessageSquare
-                      className={cn(
-                        "w-3.5 h-3.5 shrink-0",
-                        isActive ? "text-blue-600" : "text-slate-400 group-hover:text-slate-600"
-                      )}
-                    />
-                    <span className="truncate">{conv.title || "Conversation"}</span>
-                  </div>
-
+      {/* Focus & Interest Preset Drawer */}
+      <AnimatePresence>
+        {showProfileDrawer && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            className="overflow-hidden bg-[#F1F5F9] border-b border-[#E2E8F0] px-3.5 py-2.5 z-10 shrink-0"
+          >
+            <p className="text-[11px] font-bold text-[#334155] mb-1.5">
+              Switch Career Track to Test Adaptive Guidance:
+            </p>
+            <div className="grid grid-cols-2 gap-1.5">
+              {INTEREST_PRESETS.map((preset) => {
+                const isActive = userProfile.interests[0] === preset.interest;
+                return (
                   <button
-                    onClick={(e) => handleDeleteConversation(e, conv.id)}
-                    className="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-red-600 rounded transition-opacity"
-                    title="Delete chat"
+                    key={preset.id}
+                    type="button"
+                    onClick={() => handleInterestSwitch(preset.interest)}
+                    className={cn(
+                      "text-left p-1.5 rounded-lg border text-[11px] font-medium transition-all truncate",
+                      isActive
+                        ? "bg-[#635BFF] text-white border-[#635BFF] shadow-xs"
+                        : "bg-white text-[#1E293B] border-[#CBD5E1] hover:border-[#635BFF]"
+                    )}
                   >
-                    <Trash2 className="w-3 h-3" />
+                    {preset.label}
                   </button>
-                </div>
-              );
-            })
-          )}
-        </div>
+                );
+              })}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-        {/* Profile Card & Settings in Sidebar Footer */}
-        <div className="p-3 border-t border-slate-100 bg-slate-50/70 flex items-center justify-between">
-          <div className="flex items-center gap-2 overflow-hidden">
-            <div className="w-7 h-7 rounded-full bg-blue-100 text-blue-700 font-semibold text-xs flex items-center justify-center shrink-0">
-              {userProfile.fullName ? userProfile.fullName[0] : "P"}
-            </div>
-            <div className="overflow-hidden">
-              <div className="text-xs font-semibold text-slate-800 truncate">
-                {userProfile.fullName}
-              </div>
-              <div className="text-[10px] text-slate-400 truncate">
-                {userProfile.interests[0] || "Career Mode"}
-              </div>
-            </div>
+      {/* Chat Messages Scrollable Body */}
+      <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-3 sm:px-4 py-3 space-y-3">
+        {/* Dynamic Suggested Prompts */}
+        {suggestedPrompts.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 pb-1 max-w-full overflow-hidden">
+            {suggestedPrompts.slice(0, 4).map((prompt, idx) => (
+              <button
+                key={idx}
+                type="button"
+                onClick={() => handleSend(prompt)}
+                disabled={isTyping}
+                className="text-[10.5px] font-medium text-[#635BFF] bg-[#EEF2FF] border border-[#C7D2FE] rounded-full px-2.5 py-1 hover:bg-[#E0E7FF] transition-all active:scale-95 text-left disabled:opacity-50 max-w-full truncate"
+              >
+                {prompt}
+              </button>
+            ))}
           </div>
+        )}
 
-          <button
-            onClick={() => setIsSettingsOpen(true)}
-            className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-white rounded-lg border border-transparent hover:border-slate-200 transition-colors shrink-0"
-            title="Chatbot & Profile Settings"
-          >
-            <Settings className="w-3.5 h-3.5" />
-          </button>
-        </div>
-      </aside>
-
-      {/* ===================================================================== */}
-      {/* 2. CENTRAL CHAT CONTAINER                                            */}
-      {/* ===================================================================== */}
-      <main className="flex-1 flex flex-col h-full bg-[#F8FAFC] overflow-hidden relative">
-        {/* Top Navbar */}
-        <header className="h-12 border-b border-slate-200/80 bg-white/90 backdrop-blur-xs px-3.5 flex items-center justify-between shrink-0 z-20">
-          <div className="flex items-center gap-2 overflow-hidden">
-            <button
-              onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-              className="p-1.5 rounded-lg text-slate-500 hover:text-slate-800 hover:bg-slate-100 transition-colors"
-              title="Toggle sidebar"
-            >
-              {isSidebarOpen ? (
-                <PanelLeftClose className="w-4 h-4" />
-              ) : (
-                <PanelLeftOpen className="w-4 h-4" />
+        {/* Messages */}
+        <AnimatePresence initial={false}>
+          {messages.map((msg) => (
+            <motion.div
+              key={msg.id}
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.2 }}
+              className={cn(
+                "w-full flex flex-col",
+                msg.sender === "user" ? "items-end pr-1 sm:pr-2" : "items-start pl-0.5 sm:pl-1"
               )}
             >
               <div
                 className={cn(
-                  "max-w-[90%] rounded-[18px] px-4 py-3 text-[12.5px] leading-relaxed shadow-sm",
+                  "max-w-[85%] sm:max-w-[80%] rounded-[18px] px-3.5 py-2.5 sm:px-4 sm:py-3 text-[12px] sm:text-[12.5px] leading-relaxed shadow-xs break-words overflow-hidden",
                   msg.sender === "user"
                     ? "bg-gradient-to-r from-[#635BFF] to-[#8B5CF6] text-white rounded-br-[4px]"
                     : "bg-white border border-[#E8E5F2] text-[#172033] rounded-bl-[4px]"
                 )}
               >
                 {/* Render Markdown formatted text */}
-                <ChatMarkdownRenderer
-                  content={msg.text}
-                  isUser={msg.sender === "user"}
-                  isStreaming={streamingMessageId === msg.id}
-                />
+                <RenderChatContent content={msg.text} isUser={msg.sender === "user"} />
 
-            <span className="text-xs font-semibold text-slate-800 truncate max-w-[200px] sm:max-w-xs">
-              {activeConvTitle}
-            </span>
-          </div>
+                {/* INLINE RECOMMENDED JOBS (Clickable to Job Details Screen) */}
+                {msg.recommendedJobs && msg.recommendedJobs.length > 0 && (
+                  <div className="mt-2.5 pt-2 border-t border-[#E8E5F2] space-y-2">
+                    <div className="flex items-center gap-1.5 text-[10.5px] font-bold text-[#635BFF]">
+                      <Briefcase className="w-3.5 h-3.5 shrink-0" />
+                      <span>Recommended Jobs in Pathly:</span>
+                    </div>
 
-          <div className="flex items-center gap-2">
-            {/* Live Model Badge */}
-            <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-blue-50 text-blue-700 border border-blue-100">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              Groq · Qwen
-            </span>
-
-            <button
-              onClick={handleNewChat}
-              className="p-1.5 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg transition-colors"
-              title="New Chat"
-            >
-              <Plus className="w-4 h-4" />
-            </button>
-
-            <button
-              onClick={() => setIsSettingsOpen(true)}
-              className="p-1.5 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg transition-colors"
-              title="Settings"
-            >
-              <Settings className="w-4 h-4" />
-            </button>
-          </div>
-        </header>
-
-        {/* Messages Feed */}
-        <div className="flex-1 overflow-y-auto px-3 sm:px-4 py-4 space-y-5">
-          <div className="max-w-3xl mx-auto w-full">
-            {messages.length === 0 ? (
-              /* Professional Welcoming Hero / Starter Prompts */
-              <div className="py-8 sm:py-14 flex flex-col items-center text-center animate-in fade-in duration-200">
-                <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-700 flex items-center justify-center text-white shadow-lg shadow-blue-500/20 mb-4">
-                  <Sparkles className="w-6 h-6" />
-                </div>
-                <h2 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
-                  How can I help your career today?
-                </h2>
-                <p className="text-xs sm:text-sm text-slate-500 max-w-md mt-1.5 mb-8">
-                  Ask me anything about interview prep, technical concepts, coding, career transitions,
-                  or live openings.
-                </p>
-
-                {/* 4 Clean Prompt Starter Cards */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 w-full text-left">
-                  {SUGGESTED_STARTERS.map((s, idx) => {
-                    const IconComp = s.icon;
-                    return (
-                      <button
-                        key={idx}
-                        onClick={() => handleSend(s.prompt)}
-                        className="p-3.5 rounded-xl border border-slate-200/90 bg-white hover:border-blue-400 hover:bg-blue-50/30 transition-all text-left shadow-xs group"
-                      >
-                        <div className="flex items-center gap-2 text-xs font-semibold text-slate-800 mb-1">
-                          <IconComp className="w-3.5 h-3.5 text-blue-600" />
-                          <span>{s.title}</span>
-                          <ArrowRight className="w-3 h-3 text-slate-300 ml-auto group-hover:text-blue-600 group-hover:translate-x-0.5 transition-all" />
-                        </div>
-                        <p className="text-[12px] text-slate-500 leading-relaxed">
-                          {s.prompt}
-                        </p>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            ) : (
-              /* Message Flow */
-              <div className="space-y-6">
-                {messages.map((msg) => {
-                  const isUser = msg.sender === "user";
-
-                  return (
-                    <div
-                      key={msg.id}
-                      className={cn(
-                        "flex gap-3 text-sm",
-                        isUser ? "justify-end" : "justify-start"
-                      )}
-                    >
-                      {/* AI Avatar */}
-                      {!isUser && (
-                        <div className="w-7 h-7 rounded-lg bg-blue-600 flex items-center justify-center text-white shadow-xs shrink-0 mt-0.5">
-                          <Sparkles className="w-3.5 h-3.5" />
-                        </div>
-                      )}
-
-                      {/* Content Bubble */}
-                      <div
-                        className={cn(
-                          "flex flex-col",
-                          isUser ? "items-end max-w-[85%] sm:max-w-[75%]" : "items-start w-full max-w-[92%]"
-                        )}
-                      >
-                        {isUser ? (
-                          <div className="bg-slate-900 text-white px-4 py-2.5 rounded-2xl rounded-tr-xs text-[13.5px] leading-relaxed shadow-xs">
-                            {msg.text}
+                    <div className="space-y-1.5">
+                      {msg.recommendedJobs.map((job) => (
+                        <div
+                          key={job.id}
+                          className="bg-[#F8FAFC] border border-[#E2E8F0] rounded-xl p-2 hover:border-[#635BFF] hover:bg-[#EEF2FF]/40 transition-all cursor-pointer"
+                          onClick={() => onSelectJob?.(job.id)}
+                        >
+                          <div className="flex items-start justify-between gap-1.5">
+                            <div className="min-w-0 flex-1">
+                              <h4 className="font-bold text-[11.5px] text-[#1E293B] truncate">
+                                {job.title}
+                              </h4>
+                              <p className="text-[10px] text-[#64748B] truncate">
+                                {job.companyOrOrg} · {job.location}
+                              </p>
+                            </div>
+                            <span className="text-[9.5px] font-extrabold text-[#059669] bg-[#D1FAE5] px-1.5 py-0.5 rounded-full border border-[#A7F3D0] whitespace-nowrap shrink-0">
+                              {job.matchScore}%
+                            </span>
                           </div>
-                        ) : (
-                          <div className="w-full bg-white rounded-2xl rounded-tl-xs border border-slate-200/80 px-4 sm:px-5 py-4 shadow-xs">
-                            {/* Loading Status Indicator */}
-                            {msg.isStreaming && !msg.text && currentStatus && (
-                              <div className="flex items-center gap-2 py-1 text-xs text-blue-700 font-medium">
-                                <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-600" />
-                                <span>{currentStatus}</span>
-                              </div>
-                            )}
 
-        {/* Typing indicator (shown before first token streams) */}
-        {isTyping && !messages.find((m) => m.id === streamingMessageId)?.text && (
+                          <div className="mt-1.5 flex items-center justify-between text-[10px] pt-1 border-t border-[#E2E8F0]">
+                            <span className="font-semibold text-[#334155] truncate">
+                              {job.salaryOrScale}
+                            </span>
+                            <span className="text-[#635BFF] font-bold flex items-center gap-0.5 shrink-0">
+                              View <ArrowRight className="w-3 h-3" />
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* INLINE RECOMMENDED COURSES (Clickable to Course Details Screen) */}
+                {msg.recommendedCourses && msg.recommendedCourses.length > 0 && (
+                  <div className="mt-2 pt-2 border-t border-[#E8E5F2] space-y-1.5">
+                    <div className="flex items-center gap-1.5 text-[10.5px] font-bold text-[#0284C7]">
+                      <BookOpen className="w-3.5 h-3.5 shrink-0" />
+                      <span>Recommended Course:</span>
+                    </div>
+
+                    {msg.recommendedCourses.slice(0, 1).map((course) => (
+                      <div
+                        key={course.id}
+                        className="bg-[#F0F9FF] border border-[#BAE6FD] rounded-xl p-2 hover:border-[#0284C7] transition-all cursor-pointer"
+                        onClick={() => onSelectCourse?.(course.id)}
+                      >
+                        <div className="flex items-center justify-between gap-1.5">
+                          <div className="min-w-0 flex-1">
+                            <h4 className="font-bold text-[11px] text-[#0369A1] truncate">
+                              {course.title}
+                            </h4>
+                            <p className="text-[9.5px] text-[#64748B] truncate">
+                              {course.provider} · {course.duration}
+                            </p>
+                          </div>
+                          <span className="text-[#0284C7] font-bold text-[10px] flex items-center gap-0.5 shrink-0">
+                            Learn <ChevronRight className="w-3 h-3" />
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Response Action Bar (Copy Text & Feedback) */}
+                {msg.sender === "ai" && (
+                  <div className="flex items-center justify-between mt-2 pt-1.5 border-t border-[#E4E7EC]/70 text-[10px] text-[#94A3B8]">
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-[#635BFF] text-[9.5px]">Pathly AI</span>
+                      {/* Copy Text Button */}
+                      <button
+                        type="button"
+                        onClick={() => handleCopyText(msg.id, msg.text)}
+                        className={cn(
+                          "inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] transition-all cursor-pointer",
+                          copiedId === msg.id
+                            ? "bg-[#D1FAE5] text-[#059669] font-medium"
+                            : "hover:bg-[#F1F5F9] text-[#64748B] hover:text-[#1E293B]"
+                        )}
+                        title={copiedId === msg.id ? "Copied!" : "Copy response"}
+                      >
+                        {copiedId === msg.id ? (
+                          <>
+                            <Check className="w-3 h-3 text-[#059669]" />
+                            <span>Copied</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3 h-3" />
+                            <span>Copy</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+
+                    {msg.id !== "welcome" && (
+                      <div className="flex items-center gap-0.5">
+                        <button
+                          type="button"
+                          onClick={() => handleFeedback(msg.id, "up")}
+                          className={cn(
+                            "p-1 rounded-full transition-colors",
+                            msg.feedback === "up"
+                              ? "bg-[#DCFCE7] text-[#15803D]"
+                              : "hover:text-[#667085] hover:bg-slate-100"
+                          )}
+                          title="Helpful"
+                        >
+                          <ThumbsUp className="w-2.5 h-2.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleFeedback(msg.id, "down")}
+                          className={cn(
+                            "p-1 rounded-full transition-colors",
+                            msg.feedback === "down"
+                              ? "bg-[#FEE2E2] text-[#DC2626]"
+                              : "hover:text-[#667085] hover:bg-slate-100"
+                          )}
+                          title="Not helpful"
+                        >
+                          <ThumbsDown className="w-2.5 h-2.5" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+
+        {/* Typing indicator */}
+        {isTyping && (
           <motion.div
             initial={{ opacity: 0, y: 5 }}
             animate={{ opacity: 1, y: 0 }}
-            className="flex justify-start"
+            className="flex justify-start pl-1"
           >
-            <div className="bg-white border border-[#E8E5F2] rounded-[18px] rounded-bl-[4px] px-4 py-3 shadow-sm flex items-center gap-2">
-              <span className="text-[11px] font-medium text-[#64748B]">Pathly AI is thinking...</span>
-              <div className="flex items-center gap-1">
+            <div className="bg-white border border-[#E8E5F2] rounded-[18px] rounded-bl-[4px] px-3.5 py-2.5 shadow-xs flex items-center gap-2">
+              <div className="w-4.5 h-4.5 rounded-full bg-[#635BFF]/10 flex items-center justify-center">
+                <Sparkles className="w-3 h-3 text-[#635BFF] animate-pulse" />
+              </div>
+              <span className="text-[11px] font-medium text-[#475569]">
+                Pathly AI is thinking...
+              </span>
+              <div className="flex items-center gap-0.5 ml-0.5">
                 <div className="w-1.5 h-1.5 rounded-full bg-[#635BFF] animate-bounce" style={{ animationDelay: "0ms" }} />
                 <div className="w-1.5 h-1.5 rounded-full bg-[#635BFF] animate-bounce" style={{ animationDelay: "150ms" }} />
                 <div className="w-1.5 h-1.5 rounded-full bg-[#635BFF] animate-bounce" style={{ animationDelay: "300ms" }} />
@@ -788,83 +561,139 @@ export function AiCoachScreen({
           </motion.div>
         )}
 
-                            {/* Response Actions (Requirement 5) */}
-                            {!msg.isStreaming && msg.text && (
-                              <div className="mt-3.5 pt-3 border-t border-slate-100 flex items-center gap-1.5 text-slate-400">
-                                {/* Copy */}
-                                <button
-                                  onClick={() => handleCopy(msg.id, msg.text)}
-                                  className="flex items-center gap-1 px-2 py-1 rounded text-xs hover:text-slate-700 hover:bg-slate-100 transition-colors"
-                                  title="Copy response"
-                                >
-                                  {copiedId === msg.id ? (
-                                    <>
-                                      <Check className="w-3.5 h-3.5 text-emerald-600" />
-                                      <span className="text-emerald-600 font-medium">Copied</span>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <Copy className="w-3.5 h-3.5" />
-                                      <span>Copy</span>
-                                    </>
-                                  )}
-                                </button>
+        <div ref={chatEndRef} />
+      </div>
 
-                                {/* Regenerate */}
-                                <button
-                                  onClick={handleRegenerate}
-                                  className="flex items-center gap-1 px-2 py-1 rounded text-xs hover:text-slate-700 hover:bg-slate-100 transition-colors"
-                                  title="Regenerate answer"
-                                >
-                                  <RotateCcw className="w-3.5 h-3.5" />
-                                  <span>Regenerate</span>
-                                </button>
-
-                                {/* Like */}
-                                <button
-                                  onClick={() => handleFeedback(msg.id, "up")}
-                                  className={cn(
-                                    "p-1.5 rounded transition-colors",
-                                    msg.feedback === "up"
-                                      ? "text-blue-600 bg-blue-50"
-                                      : "hover:text-slate-700 hover:bg-slate-100"
-                                  )}
-                                  title="Good response"
-                                >
-                                  <ThumbsUp className="w-3.5 h-3.5" />
-                                </button>
-
-                                {/* Dislike */}
-                                <button
-                                  onClick={() => handleFeedback(msg.id, "down")}
-                                  className={cn(
-                                    "p-1.5 rounded transition-colors",
-                                    msg.feedback === "down"
-                                      ? "text-red-600 bg-red-50"
-                                      : "hover:text-slate-700 hover:bg-slate-100"
-                                  )}
-                                  title="Bad response"
-                                >
-                                  <ThumbsDown className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-
-                      {/* User Avatar */}
-                      {isUser && (
-                        <div className="w-7 h-7 rounded-lg bg-slate-900 flex items-center justify-center text-white text-xs font-semibold shadow-xs shrink-0 mt-0.5">
-                          {userProfile.fullName ? userProfile.fullName[0] : "U"}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-            <div ref={messagesEndRef} />
+      {/* Sticky Bottom Input Bar */}
+      <div className="shrink-0 bg-white border-t border-[#E8E5F2] px-3 sm:px-4 pt-2.5 pb-2 shadow-md">
+        <div className="flex items-center gap-2 max-w-full">
+          <div className="flex-1 min-w-0 relative">
+            <input
+              type="text"
+              value={inputValue}
+              onChange={(e) => setInputValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSend();
+                }
+              }}
+              placeholder={`Ask about jobs, skills, or your ${userProfile.readinessScore}% score...`}
+              disabled={isTyping}
+              className="w-full h-[40px] pl-3.5 pr-9 rounded-full bg-[#F1F5F9] border border-[#E4E7EC] text-[12px] sm:text-[12.5px] text-[#172033] placeholder:text-[#94A3B8] focus:outline-none focus:border-[#635BFF] focus:ring-2 focus:ring-[#635BFF]/15 transition-all disabled:opacity-60"
+            />
+            <button
+              type="button"
+              onClick={() => handleSend("Give me tailored advice for my top matching job in Pathly")}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#94A3B8] hover:text-[#635BFF] transition-colors p-1"
+              title="Quick insight"
+            >
+              <Zap className="w-3.5 h-3.5" />
+            </button>
           </div>
+
+          <button
+            type="button"
+            onClick={() => handleSend()}
+            disabled={!inputValue.trim() || isTyping}
+            className="w-[40px] h-[40px] shrink-0 rounded-full bg-gradient-to-r from-[#635BFF] to-[#8B5CF6] text-white flex items-center justify-center shadow-md shadow-[#635BFF]/25 hover:shadow-lg hover:shadow-[#635BFF]/35 transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <Send className="w-3.5 h-3.5 ml-0.5" />
+          </button>
         </div>
 
+        {/* AI Disclaimer */}
+        <div className="pt-1.5 pb-0.5">
+          <div className="flex items-center gap-1 text-[9px] text-[#94A3B8] justify-center text-center truncate">
+            <AlertCircle className="w-2.5 h-2.5 shrink-0" />
+            <span className="truncate">Personalized career guidance · Powered by Groq LPU</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// Markdown Renderer Component for AI Responses
+// ============================================================================
+function RenderChatContent({ content, isUser }: { content: string; isUser: boolean }) {
+  if (isUser) {
+    return <div className="whitespace-pre-line break-words">{content}</div>;
+  }
+
+  const lines = content.split("\n");
+
+  return (
+    <div className="space-y-1.5 text-[12px] leading-relaxed break-words">
+      {lines.map((line, idx) => {
+        const trimmed = line.trim();
+
+        if (!trimmed) {
+          return <div key={idx} className="h-1" />;
+        }
+
+        // Header 3
+        if (trimmed.startsWith("### ")) {
+          return (
+            <h4 key={idx} className="font-bold text-[12.5px] sm:text-[13px] text-[#0F172A] mt-2 mb-1">
+              {formatInline(trimmed.replace(/^###\s+/, ""))}
+            </h4>
+          );
+        }
+
+        // Header 2 or 1
+        if (trimmed.startsWith("## ") || trimmed.startsWith("# ")) {
+          return (
+            <h3 key={idx} className="font-extrabold text-[13px] sm:text-[13.5px] text-[#0F172A] mt-2 mb-1">
+              {formatInline(trimmed.replace(/^#+\s+/, ""))}
+            </h3>
+          );
+        }
+
+        // Bullet point
+        if (trimmed.startsWith("- ") || trimmed.startsWith("• ") || trimmed.startsWith("* ")) {
+          const itemText = trimmed.replace(/^[-•*]\s+/, "");
+          return (
+            <div key={idx} className="flex items-start gap-1.5 pl-0.5">
+              <span className="text-[#635BFF] font-bold text-[12px] leading-none mt-1 shrink-0">•</span>
+              <div className="flex-1 min-w-0">{formatInline(itemText)}</div>
+            </div>
+          );
+        }
+
+        // Numbered list item (e.g. 1. 2. 3.)
+        const numMatch = trimmed.match(/^(\d+)\.\s+(.*)/);
+        if (numMatch) {
+          return (
+            <div key={idx} className="flex items-start gap-1.5 pl-0.5">
+              <span className="font-bold text-[#635BFF] text-[11px] min-w-[14px] shrink-0">
+                {numMatch[1]}.
+              </span>
+              <div className="flex-1 min-w-0">{formatInline(numMatch[2])}</div>
+            </div>
+          );
+        }
+
+        // Normal paragraph
+        return <p key={idx}>{formatInline(trimmed)}</p>;
+      })}
+    </div>
+  );
+}
+
+// Inline parser for bold (**text**) and italic (*text*)
+function formatInline(text: string) {
+  const parts = text.split(/(\*\*.*?\*\*)/g);
+
+  return parts.map((part, i) => {
+    if (part.startsWith("**") && part.endsWith("**")) {
+      return (
+        <strong key={i} className="font-bold text-[#0F172A]">
+          {part.slice(2, -2)}
+        </strong>
+      );
+    }
+    return part;
+  });
+}
