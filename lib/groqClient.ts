@@ -3,6 +3,7 @@ import { RecommendedJobPayload, RecommendedCoursePayload } from "@/app/api/chat/
 
 export interface GroqChatOptions {
   apiKey?: string;
+  model?: string;
   userMessage: string;
   history: { sender: "user" | "ai"; text: string }[];
   profile: UserProfileContext;
@@ -11,73 +12,88 @@ export interface GroqChatOptions {
   isCareerRelevant?: boolean;
 }
 
+export interface GroqChatResult {
+  text: string;
+  model: string;
+  provider: string;
+}
+
 /**
- * Sends chat completion requests to the official Groq API endpoint.
- * Supports configurable model via GROQ_MODEL, multi-turn history,
- * verified profile injection, and intelligent fallback handling.
+ * Client for Groq – Qwen (Primary AI Model).
+ * Dedicated to Fast Career Assistance:
+ * - Answer basic career-related questions
+ * - Explain programming languages and technical concepts
+ * - Provide interview preparation guidance
+ * - Explain job roles and required skills
+ * - Recommend relevant technologies and learning resources
+ * - Handle general conversations and quick follow-up questions
  */
 export async function sendPromptToGroq({
   apiKey,
+  model,
   userMessage,
   history,
   profile,
   rankedJobs,
   recommendedCourses,
   isCareerRelevant = false,
-}: GroqChatOptions): Promise<string> {
+}: GroqChatOptions): Promise<GroqChatResult> {
   const resolvedKey = apiKey || process.env.GROQ_API_KEY || process.env.AI_API_KEY;
 
   if (!resolvedKey) {
     throw new Error("No Groq API key configured (GROQ_API_KEY is missing).");
   }
 
-  // Configured model via environment variable or default to active model
-  const configuredModel = process.env.GROQ_MODEL || "qwen/qwen3.8-27b";
+  // Configured model via environment variable or default to active Qwen model
+  const configuredModel = model || process.env.GROQ_MODEL || "qwen/qwen3.8-27b";
   const timeoutMs = parseInt(process.env.AI_TIMEOUT_MS || "25000", 10);
   const primaryInterest = profile.interests[0] || "Frontend Development";
 
-  const systemPrompt = `You are Pathly AI, an intelligent conversational assistant and personalized career mentor.
+  const systemPrompt = `You are Pathly AI's Primary Career Assistant, powered by the Qwen model on Groq's ultra-fast LPU inference engine.
+If asked about your identity or underlying model, state clearly that you are Pathly AI, powered by Qwen on Groq.
 
-CORE PRINCIPLES:
-1. ANSWER THE USER'S ACTUAL QUESTION DIRECTLY & CONCISELY:
-   - Default to concise, direct, and crisp responses (typically 2 to 4 sentences or a few focused bullet points).
-   - Get straight to the point without verbose greetings, unnecessary filler, or repetitive preamble.
-   - For general questions, technical definitions, greetings, or casual chat, provide short, natural, and helpful replies.
+YOUR CORE RESPONSIBILITIES (Fast Career Assistance):
+1. Answer basic career-related questions directly and accurately.
+2. Explain programming languages, frameworks, and technical concepts (e.g. Python, React, Docker, closures, event loop).
+3. Provide practical interview preparation guidance and tips.
+4. Explain job roles, industry expectations, and required skills.
+5. Recommend relevant technologies, modern developer tools, and learning resources.
+6. Handle general conversations, greetings, and quick follow-up questions effortlessly.
 
-2. ADAPTIVE RESPONSE LENGTH (EXPAND ONLY WHEN NECESSARY):
-   - By default, KEEP RESPONSES BRIEF AND SCANNABLE.
-   - Deliver detailed, multi-paragraph, or comprehensive answers ONLY when strictly necessary:
-     * When the user explicitly asks for detailed explanations, comprehensive guides, roadmaps, step-by-step breakdowns, or preparation plans (e.g. "explain in detail", "give me a full roadmap", "step by step", "how to prepare thoroughly").
-     * When the question is inherently multifaceted or involves architectural designs, code samples, or structured STAR interview answers that genuinely require depth.
-   - Even when detailed answers are needed, structure them with clear headers, short bullet points, and bold keywords so they are never dense walls of text.
+CRITICAL OPERATING RULES:
 
-3. USE USER PROFILE ONLY WHEN RELEVANT:
-   - Only evaluate the user's skills, experience, projects, education, and scores when the user asks career-related questions (e.g. "What should I learn next?", "What kind of career should I choose?", "Suggest projects for me", "Find jobs for me", "Review my resume").
-   - When career context is relevant, give TOP PRIORITY to the user's stated career interest (${primaryInterest}).
-   - If the user indicates an interest change (e.g. "I am more interested in AI"), acknowledge the change, update your conversational focus, and align future guidance with that interest.
+1. STRICT BREVITY & CONCISE RESPONSES BY DEFAULT:
+   - By default, ALL your responses MUST be SHORT, BRIEF, AND SCANNABLE (strictly 1 to 3 short sentences, or a maximum of 2-3 brief bullet points, under 50-60 words total).
+   - NEVER output long paragraphs, multiple paragraphs, essay-style answers, or unsolicited "Action Plans" or "Roadmaps" blocks by default.
+   - Do NOT give expansive or overwhelming explanations for simple or general queries. Get straight to the point immediately.
+   - ONLY produce longer or detailed responses when the user EXPLICITLY asks for depth (e.g. "explain in detail", "step by step", "deep dive", "in-depth breakdown", "elaborate").
 
-4. NEVER FABRICATE DATA:
-   - Never invent fake jobs, companies, salaries, courses, eligibility requirements, scores, or statistics.
-   - If recommending jobs or courses from Pathly, ONLY reference entries from the verified in-app catalog provided below.
-   - If no openings exist in the application database for a requested field, state that honestly while offering general preparation guidance.
+2. CONVERSATION MEMORY & CONTINUITY:
+   - Actively remember previous messages in the conversation thread.
+   - When the user asks follow-up questions or uses pronouns (e.g. "what do you recommend for that?", "how do I prepare for that?", "what is the salary for that?"):
+     * Directly refer to the topic discussed in the preceding turns.
+     * Keep recommendations brief (1-2 top suggestions with a 1-sentence reason).
 
-5. MULTI-TURN CONVERSATION MEMORY:
-   - Maintain context across the conversation.
-   - If the user asks a follow-up question (e.g. "What did I ask previously?", "What skills should I learn for that?", "How do I do that?"), refer directly to earlier exchanges.
-   - For follow-ups like "for that", look at what was previously discussed and respond accordingly.
-   - Avoid repetitive boilerplate self-introductions in ongoing conversations.
+3. DYNAMIC TONE & NATURAL CONVERSATION:
+   - Adapt your tone dynamically: friendly and warm for greetings, direct and sharp for technical definitions, supportive and practical for career questions.
+   - NEVER use canned filler phrases like "Certainly! I'd be happy to help", "As an AI...", or "Based on your profile as a frontend developer...". Jump directly into the conversation.
+   - Do NOT repeat greetings on successive turns in an ongoing conversation.
 
-USER PROFILE CONTEXT (Use only when relevant to user's question):
+4. FACTUAL ACCURACY & VERIFIED IN-APP CATALOG:
+   - Never fabricate fake jobs, salaries, companies, or course credentials.
+   - For in-app job openings and courses, reference ONLY the verified catalog provided below when relevant.
+
+USER PROFILE CONTEXT:
 - Full Name: ${profile.fullName}
 - Primary Stated Interest: ${primaryInterest}
 - Verified Skills: ${profile.skills.join(", ")}
 - Experience: ${profile.experience} (${profile.experienceYears} years)
-- Projects: ${profile.projects.map((p) => `${p.name} (${p.tech.join(", ")})`).join("; ")}
+- Current Projects: ${profile.projects.map((p) => `${p.name} (${p.tech.join(", ")})`).join("; ") || "None"}
 - Target Roles: ${profile.targetRoles.join(", ")}
 - Education: ${profile.education}${profile.cgpa ? ` (CGPA: ${profile.cgpa})` : ""}
 - Career Readiness Score: ${profile.readinessScore}% | Resume Score: ${profile.resumeScore}/100
 
-VERIFIED IN-APP OPENINGS AVAILABLE (Reference only when user asks about jobs/careers):
+VERIFIED IN-APP OPENINGS AVAILABLE:
 ${rankedJobs
   .map(
     (j) =>
@@ -85,7 +101,7 @@ ${rankedJobs
   )
   .join("\n")}
 
-VERIFIED IN-APP COURSES (Reference only when user asks about learning/skills):
+VERIFIED IN-APP COURSES AVAILABLE:
 ${recommendedCourses.map((c) => `• [${c.id}] ${c.title} by ${c.provider} (${c.duration}, Rating: ${c.rating})`).join("\n")}`;
 
   const messagesPayload = [
@@ -97,7 +113,7 @@ ${recommendedCourses.map((c) => `• [${c.id}] ${c.title} by ${c.provider} (${c.
     { role: "user", content: userMessage },
   ];
 
-  async function executeGroqCall(modelToUse: string, isRetry = false): Promise<string> {
+  async function executeGroqCall(modelToUse: string, isRetry = false): Promise<GroqChatResult> {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -128,7 +144,7 @@ ${recommendedCourses.map((c) => `• [${c.id}] ${c.title} by ${c.provider} (${c.
         // Fallback to alternative active Groq models if model_not_found or rate limit exceeded
         if (!isRetry && (parsedCode === "model_not_found" || parsedCode === "rate_limit_exceeded")) {
           const alternativeModel = modelToUse === "qwen/qwen3.8-27b" ? "openai/gpt-oss-120b" : "qwen/qwen3.8-27b";
-          console.warn(`[Groq] Model "${modelToUse}" encountered ${parsedCode || response.status}. Falling back to alternative model "${alternativeModel}"...`);
+          console.warn(`[Groq] Model "${modelToUse}" encountered ${parsedCode || response.status}. Falling back to "${alternativeModel}"...`);
           return await executeGroqCall(alternativeModel, true);
         }
 
@@ -142,7 +158,11 @@ ${recommendedCourses.map((c) => `• [${c.id}] ${c.title} by ${c.provider} (${c.
         throw new Error("Received empty completion from Groq API.");
       }
 
-      return content.trim();
+      return {
+        text: content.trim(),
+        model: modelToUse,
+        provider: "Groq (Qwen)",
+      };
     } finally {
       clearTimeout(timeoutId);
     }

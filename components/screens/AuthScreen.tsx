@@ -317,7 +317,13 @@ export function AuthScreen({
       setAuthSuccess(true);
     } catch (err: any) {
       setIsLoading(false);
-      const message = err?.detail || err?.message || "Authentication failed. Please verify credentials.";
+      let message = err?.detail || err?.message || "Authentication failed. Please verify credentials.";
+      if (
+        typeof message === "string" &&
+        (message.toLowerCase().includes("failed to fetch") || message.toLowerCase().includes("networkerror"))
+      ) {
+        message = "Unable to connect to the backend server (http://localhost:8000). Please ensure the backend service is running.";
+      }
       setApiError(message);
     }
   };

@@ -3,6 +3,7 @@ import { DETAILED_JOBS_AND_EXAMS } from "@/lib/jobsData";
 import { COURSES_DATA } from "@/lib/coursesData";
 import { DEFAULT_USER_PROFILE, UserProfileContext } from "@/lib/userProfile";
 import { sendPromptToGroq } from "@/lib/groqClient";
+import { sendPromptToGemini } from "@/lib/geminiClient";
 import { JobDetailItem } from "@/components/screens/JobDetailsScreen";
 
 interface ChatRequestPayload {
@@ -88,23 +89,69 @@ export async function POST(req: NextRequest) {
     // Only attach courses when user explicitly asks for courses or skill roadmap
     const attachCourses = intent === "course_recommendation" || intent === "skill_development";
 
-    // 5. Attempt Live AI Provider (Groq / Gemini / Semantic Engine)
+    // 5. Dual-AI Model Router: Groq – Qwen (Primary) vs Google Gemini Flash (Secondary)
+    const routing = routeToModel(userMessage, history, intent);
     let aiTextResponse = "";
     let aiProviderName = "Internal Semantic Reasoning Engine";
     let aiModelName = "Built-in Pathly Engine";
+    let aiRoleName = routing.role === "secondary_gemini"
+      ? "Advanced Career Guidance (Gemini Flash)"
+      : "Fast Career Assistance (Groq Qwen)";
     let aiResponseStatus = "Ready";
     let errorDetails = "";
 
     const groqKey =
       process.env.GROQ_API_KEY ||
       (process.env.AI_PROVIDER === "groq" ? process.env.AI_API_KEY : undefined);
-    const groqModel = process.env.GROQ_MODEL || "qwen/qwen3.8-27b";
+    const geminiKey =
+      process.env.GEMINI_API_KEY ||
+      (process.env.AI_PROVIDER === "gemini" ? process.env.AI_API_KEY : undefined);
 
-    if (groqKey) {
-      aiProviderName = "Groq";
-      aiModelName = groqModel;
+    if (routing.role === "secondary_gemini" && geminiKey) {
+      // 5A. Route to Secondary AI: Google Gemini Flash (Advanced Career Guidance)
       try {
-        aiTextResponse = await sendPromptToGroq({
+        const geminiResult = await sendPromptToGemini({
+          apiKey: geminiKey,
+          model: process.env.GEMINI_MODEL,
+          userMessage,
+          history,
+          profile,
+          rankedJobs: rankedJobs.slice(0, 3),
+          recommendedCourses: recommendedCourses.slice(0, 2),
+          isDetailedRequest: true,
+        });
+        aiTextResponse = geminiResult.text;
+        aiProviderName = "Google Gemini Flash";
+        aiModelName = geminiResult.model;
+        aiResponseStatus = "Success (Gemini 200 OK)";
+      } catch (geminiErr: any) {
+        errorDetails = geminiErr?.message || String(geminiErr);
+        console.warn("[Chat API] Secondary AI (Gemini Flash) failed, attempting failover to Primary AI (Groq Qwen):", geminiErr);
+        // Graceful failover to Groq Qwen
+        if (groqKey) {
+          try {
+            const groqResult = await sendPromptToGroq({
+              apiKey: groqKey,
+              userMessage,
+              history,
+              profile,
+              rankedJobs: rankedJobs.slice(0, 3),
+              recommendedCourses: recommendedCourses.slice(0, 2),
+              isCareerRelevant: true,
+            });
+            aiTextResponse = groqResult.text;
+            aiProviderName = "Groq (Qwen) [Failover]";
+            aiModelName = groqResult.model;
+            aiResponseStatus = "Success (Groq Failover 200 OK)";
+          } catch (groqErr: any) {
+            console.warn("[Chat API] Groq failover also failed:", groqErr);
+          }
+        }
+      }
+    } else if (groqKey) {
+      // 5B. Route to Primary AI: Groq – Qwen (Fast Career Assistance)
+      try {
+        const groqResult = await sendPromptToGroq({
           apiKey: groqKey,
           userMessage,
           history,
@@ -113,30 +160,53 @@ export async function POST(req: NextRequest) {
           recommendedCourses: recommendedCourses.slice(0, 2),
           isCareerRelevant: attachJobs || attachCourses,
         });
-        aiResponseStatus = aiTextResponse ? "Success (200 OK)" : "Empty response";
-      } catch (err: any) {
-        aiResponseStatus = "Failed (Fallback to Semantic Engine)";
-        errorDetails = err?.message || String(err);
-        console.warn("[Chat API] Groq API call failed, falling back to internal reasoning engine:", err);
+        aiTextResponse = groqResult.text;
+        aiProviderName = "Groq (Qwen)";
+        aiModelName = groqResult.model;
+        aiResponseStatus = "Success (Groq 200 OK)";
+      } catch (groqErr: any) {
+        errorDetails = groqErr?.message || String(groqErr);
+        console.warn("[Chat API] Primary AI (Groq Qwen) failed, attempting failover to Secondary AI (Gemini Flash):", groqErr);
+        // Graceful failover to Gemini Flash
+        if (geminiKey) {
+          try {
+            const geminiResult = await sendPromptToGemini({
+              apiKey: geminiKey,
+              model: process.env.GEMINI_MODEL,
+              userMessage,
+              history,
+              profile,
+              rankedJobs: rankedJobs.slice(0, 3),
+              recommendedCourses: recommendedCourses.slice(0, 2),
+            });
+            aiTextResponse = geminiResult.text;
+            aiProviderName = "Google Gemini Flash [Failover]";
+            aiModelName = geminiResult.model;
+            aiResponseStatus = "Success (Gemini Failover 200 OK)";
+          } catch (geminiErr: any) {
+            console.warn("[Chat API] Gemini failover also failed:", geminiErr);
+          }
+        }
       }
-    } else if (process.env.GEMINI_API_KEY && process.env.AI_PROVIDER === "gemini") {
-      aiProviderName = "Google Gemini";
-      aiModelName = "gemini-1.5-flash";
+    } else if (geminiKey) {
+      // If Groq key is not present, use Gemini Flash
       try {
-        aiTextResponse = await callGeminiApi({
-          apiKey: process.env.GEMINI_API_KEY,
+        const geminiResult = await sendPromptToGemini({
+          apiKey: geminiKey,
+          model: process.env.GEMINI_MODEL,
           userMessage,
           history,
           profile,
           rankedJobs: rankedJobs.slice(0, 3),
           recommendedCourses: recommendedCourses.slice(0, 2),
-          intent,
         });
-        aiResponseStatus = aiTextResponse ? "Success (200 OK)" : "Empty response";
-      } catch (err: any) {
-        aiResponseStatus = "Failed (Fallback to Semantic Engine)";
-        errorDetails = err?.message || String(err);
-        console.warn("[Chat API] Gemini API call failed, falling back to internal reasoning engine:", err);
+        aiTextResponse = geminiResult.text;
+        aiProviderName = "Google Gemini Flash";
+        aiModelName = geminiResult.model;
+        aiResponseStatus = "Success (Gemini 200 OK)";
+      } catch (geminiErr: any) {
+        errorDetails = geminiErr?.message || String(geminiErr);
+        console.warn("[Chat API] Gemini API call failed:", geminiErr);
       }
     } else {
       aiProviderName = "Internal Semantic Reasoning Engine";
@@ -180,6 +250,8 @@ export async function POST(req: NextRequest) {
       updatedProfile,
       provider: aiProviderName,
       model: aiModelName,
+      role: aiRoleName,
+      routingReason: routing.reason,
       profileSummary: {
         name: profile.fullName,
         primaryInterest: profile.interests[0] || "Frontend Development",
@@ -209,6 +281,116 @@ export async function POST(req: NextRequest) {
       },
     });
   }
+}
+
+// ============================================================================
+// Dual-AI Model Router (Groq Qwen vs Google Gemini Flash)
+// ============================================================================
+type ModelRouteTarget = "primary_groq" | "secondary_gemini";
+
+interface ModelRouteDecision {
+  role: ModelRouteTarget;
+  reason: string;
+}
+
+function routeToModel(
+  userMessage: string,
+  history: { sender: "user" | "ai"; text: string }[],
+  intent: ChatIntent
+): ModelRouteDecision {
+  const m = userMessage.toLowerCase().trim();
+
+  // 1. Google Gemini Flash (Secondary AI Model) Responsibilities:
+  // - Generate personalized career roadmaps
+  // - Analyze resumes and suggest improvements
+  // - Perform skill gap analysis
+  // - Compare different career paths
+  // - Create structured learning plans
+  // - Provide long-term career guidance
+  // - Handle complex and detailed career-related queries
+
+  // A. Resume analysis & improvements / ATS audit
+  const isResumeAnalysis =
+    intent === "resume_improvement" ||
+    /\b(resume|cv|ats|curriculum vitae|resume analysis|resume score|readiness score|audit my resume|improve my resume|resume feedback|bullet points for resume)\b/i.test(m);
+
+  if (isResumeAnalysis) {
+    return {
+      role: "secondary_gemini",
+      reason: "Resume Analysis & ATS Improvement (Secondary AI: Gemini Flash)",
+    };
+  }
+
+  // B. Personalized career roadmaps & structured learning plans
+  const isRoadmapOrLearningPlan =
+    /\b(career roadmap|learning roadmap|structured learning plan|study plan|progression plan|curriculum|step-by-step plan|step by step plan|detailed roadmap|roadmap for)\b/i.test(m) ||
+    (/\broadmap\b/i.test(m) && !/what is a roadmap/i.test(m));
+
+  if (isRoadmapOrLearningPlan) {
+    return {
+      role: "secondary_gemini",
+      reason: "Personalized Career Roadmap & Structured Learning Plan (Secondary AI: Gemini Flash)",
+    };
+  }
+
+  // C. Skill gap analysis
+  const isSkillGapAnalysis =
+    /\b(skill gap|skill gaps|skills gap|gap analysis|missing skills|skills to bridge|bridge the gap|skill gap analysis)\b/i.test(m);
+
+  if (isSkillGapAnalysis) {
+    return {
+      role: "secondary_gemini",
+      reason: "Skill Gap Analysis (Secondary AI: Gemini Flash)",
+    };
+  }
+
+  // D. Compare different career paths
+  const isCareerPathComparison =
+    /\b(compare.*career|which career path|frontend vs backend|backend vs frontend|software engineer vs data scientist|devops vs cloud|fullstack vs frontend|frontend vs fullstack|compare paths|which path should i choose|compare both)\b/i.test(m) ||
+    (/\b(compare|vs|versus)\b/i.test(m) && /\b(career|path|role|developer|engineer|job|field)\b/i.test(m));
+
+  if (isCareerPathComparison) {
+    return {
+      role: "secondary_gemini",
+      reason: "Career Path Comparison (Secondary AI: Gemini Flash)",
+    };
+  }
+
+  // E. Long-term career guidance
+  const isLongTermGuidance =
+    /\b(long-term|long term|future growth|next 2 years|next 5 years|career strategy|senior transition|transition to lead|staff engineer path|career trajectory|future-proof)\b/i.test(m);
+
+  if (isLongTermGuidance) {
+    return {
+      role: "secondary_gemini",
+      reason: "Long-Term Career Guidance (Secondary AI: Gemini Flash)",
+    };
+  }
+
+  // F. Complex & detailed career-related queries
+  const isComplexDetailedCareerQuery =
+    /\b(explain in detail|detailed breakdown|deep dive|comprehensive guide|comprehensive breakdown|in-depth analysis|detailed analysis)\b/i.test(m) &&
+    (intent === "career_guidance" || intent === "skill_development" || intent === "project_presentation");
+
+  if (isComplexDetailedCareerQuery) {
+    return {
+      role: "secondary_gemini",
+      reason: "Complex & Detailed Career Analysis (Secondary AI: Gemini Flash)",
+    };
+  }
+
+  // 2. Groq – Qwen (Primary AI Model) Responsibilities:
+  // - Fast Career Assistance
+  // - Answer basic career-related questions
+  // - Explain programming languages and technical concepts
+  // - Provide interview preparation guidance
+  // - Explain job roles and required skills
+  // - Recommend relevant technologies and learning resources
+  // - Handle general conversations and quick follow-up questions
+  return {
+    role: "primary_groq",
+    reason: "Fast Career Assistance & Technical Inquiries (Primary AI: Groq Qwen)",
+  };
 }
 
 // ============================================================================
@@ -333,12 +515,13 @@ function classifyIntent(
     return "technical_question";
   }
 
-  // 14. Pure Greetings & General Pleasantries ONLY
+  // 14. Pure Greetings, General Pleasantries & Identity Questions
   // Strictly matched so substantive questions never get treated as greetings!
   if (
     /^(hi|hello|hey|hiya|greetings|howdy|good\s+(morning|afternoon|evening))[\s.,!]*$/i.test(m) ||
     /^(how are you|how's it going|how are you doing|how do you do)[\s.,?!]*$/i.test(m) ||
-    /^(who are you|what is your name|what can you do|introduce yourself)[\s.,?!]*$/i.test(m)
+    /^(who are you|what is your name|what can you do|introduce yourself)[\s.,?!]*$/i.test(m) ||
+    /who (made|created|built) you|what (model|llm|engine)|are you (qwen|gemini|chatgpt)|ur not qwen|you are not qwen/i.test(m)
   ) {
     return "general_conversation";
   }
@@ -676,15 +859,27 @@ function generateSemanticResponse({
   // 4. General Conversation & Greetings ("Hi", "Hello", "Hi, how are you?")
   // --------------------------------------------------------------------------
   if (intent === "general_conversation") {
+    if (
+      /who (made|created|built) you|what (model|llm|engine) are you|are you (qwen|gemini|chatgpt|openai)/i.test(q) ||
+      /so (ur|you're|you are) not qwen/i.test(q)
+    ) {
+      return `I am **Pathly AI**, powered by the **Qwen** model running on Groq's high-speed LPU inference engine. I'm tailored to provide rapid technical guidance and personalized career coaching!`;
+    }
+
     if (/how are you|how's it going|how are you doing/i.test(q)) {
-      return `Hello! I'm doing well, thank you. How can I help you today with your tech questions or career plans?`;
+      return `I'm doing well, thank you for asking! How are you doing today? What would you like to explore or practice?`;
     }
 
     if (/who are you|what is your name|what can you do|introduce yourself/i.test(q)) {
-      return `I'm **Pathly AI**, your career assistant. I can explain tech concepts, review your skills, recommend in-app courses and jobs, or help with interview preparation. What would you like to explore?`;
+      return `I'm **Pathly AI**, your intelligent career mentor. I can explain complex technical concepts, analyze your skill gaps, recommend verified in-app jobs and courses, or conduct mock interview prep. What would you like to start with?`;
     }
 
-    return `Hello! 👋 How can I help you today? Feel free to ask a technical question or explore career guidance!`;
+    const greetings = [
+      `Hey ${profile.fullName ? profile.fullName.split(" ")[0] : "there"}! 👋 Great to connect. What's on your mind today?`,
+      `Hi there! Ready to explore tech concepts, upskill, or look at career opportunities? What can I help you with?`,
+      `Hello! 👋 How can I help you today? Feel free to ask any technical question, check out career paths, or practice interview concepts.`,
+    ];
+    return greetings[Math.floor(Math.random() * greetings.length)];
   }
 
   // --------------------------------------------------------------------------
@@ -971,7 +1166,7 @@ Focus on clean code architecture and modular design. How would you like to proce
 }
 
 // ============================================================================
-// Contextual Follow-Up Suggestions
+// Contextual Follow-Up Suggestions (Dynamic & Context-Aware)
 // ============================================================================
 function generateFollowUps(
   intent: ChatIntent,
@@ -979,98 +1174,118 @@ function generateFollowUps(
   profile: UserProfileContext,
   topJob: RecommendedJobPayload | null
 ): string[] {
+  const m = userMessage.toLowerCase();
+
+  // Dynamic context-aware chips for specific tech/topics
+  if (m.includes("next.js") || m.includes("nextjs")) {
+    return [
+      "How do Server Actions work in Next.js?",
+      "How can I optimize Next.js performance?",
+      "What projects can I build with Next.js?",
+    ];
+  }
+
+  if (m.includes("react") || m.includes("angular")) {
+    return [
+      "Explain React hook performance & memoization.",
+      "What are the best state management options?",
+      "Suggest React projects for my portfolio.",
+    ];
+  }
+
+  if (m.includes("python") || m.includes("machine learning") || m.includes("deep learning") || m.includes(" ai ") || m.endsWith(" ai")) {
+    return [
+      "How is Python used in Machine Learning?",
+      "Suggest high-impact AI/ML projects.",
+      "Show me top AI courses in Pathly.",
+    ];
+  }
+
+  if (m.includes("salary") || m.includes("lpa") || m.includes("pay") || m.includes("compensation")) {
+    return [
+      "What skills increase my salary potential?",
+      "Find available jobs for me.",
+      "How do I negotiate compensation?",
+    ];
+  }
+
   if (intent === "acknowledgement") {
-    return ["What should I learn next?", "Suggest any course for me.", "Find available jobs for me."];
+    return [
+      "What should I learn next?",
+      "Suggest any course for me.",
+      "Find available jobs for me.",
+    ];
   }
 
   if (intent === "career_guidance") {
-    return ["What skills should I learn for that?", "Suggest projects based on my interests.", "Find available jobs for me."];
+    return [
+      "What skills should I learn for that?",
+      "Suggest projects based on my interests.",
+      "Find available jobs for me.",
+    ];
   }
 
   if (intent === "skill_development") {
-    return ["Suggest projects based on my interests.", "Suggest any course for me.", "Find available jobs for me."];
+    return [
+      "Suggest projects based on my interests.",
+      "Suggest any course for me.",
+      "Find available jobs for me.",
+    ];
   }
 
   if (intent === "project_presentation") {
-    return ["What should I learn next?", "Suggest any course for me.", "Find available jobs for me."];
+    return [
+      "Explain in detail with a meeting script.",
+      "What technical questions might stakeholders ask?",
+      "What should I learn next?",
+    ];
   }
 
   if (intent === "course_recommendation") {
-    return ["What should I learn next?", "Suggest projects based on my interests.", "Find available jobs for me."];
-  }
-
-  if (intent === "general_conversation") {
-    return ["What kind of career should I choose?", "What is Python?", "Explain React vs Angular."];
-  }
-
-  if (intent === "technical_question") {
-    return ["Explain machine learning.", "Suggest projects based on my interests.", "What should I learn next?"];
-  }
-
-  if (intent === "career_interest_update") {
-    return ["Suggest projects based on my interests.", "What should I learn next?", "Find available jobs for me."];
+    return [
+      "What projects can I build after this?",
+      "What should I learn next?",
+      "Find available jobs for me.",
+    ];
   }
 
   if (intent === "job_search") {
-    return ["What should I learn next?", "Suggest any course for me.", "Help me prepare for interviews."];
+    return [
+      "What skills do I need for the first role?",
+      "Help me prepare for interviews.",
+      "What should I learn next?",
+    ];
   }
 
-  return ["Suggest any course for me.", "Find available jobs for me.", "Suggest projects based on my interests."];
-}
+  if (intent === "interview_prep") {
+    return [
+      "Give me a mock interview question.",
+      "How should I structure my project answer?",
+      "What are common technical pitfalls?",
+    ];
+  }
 
-async function callGeminiApi({
-  apiKey,
-  userMessage,
-  history,
-  profile,
-  rankedJobs,
-  recommendedCourses,
-  intent,
-}: any): Promise<string> {
-  const primaryInterest = profile.interests[0] || "Frontend Development";
-  const timeoutMs = parseInt(process.env.AI_TIMEOUT_MS || "25000", 10);
+  if (intent === "resume_improvement") {
+    return [
+      "How can I improve my project bullet points?",
+      "What keywords should I add for ATS?",
+      "How do I increase my readiness score?",
+    ];
+  }
 
-  const systemInstruction = `You are Pathly AI, an intelligent conversational assistant and career mentor.
-1. Answer the user's actual question directly like ChatGPT.
-2. DO NOT force career advice or job recommendations into general or technical questions.
-3. Only reference the user's profile and in-app jobs when the question asks about careers, jobs, skills, or resume.
-4. User profile: Name: ${profile.fullName}, Stated Interest: ${primaryInterest}, Skills: ${profile.skills.join(", ")}, Experience: ${profile.experience}.
-5. Never invent fake jobs, salaries, or statistics.`;
+  if (intent === "technical_question") {
+    return [
+      "Explain this in more detail.",
+      "Give me a code example.",
+      "Suggest projects based on my interests.",
+    ];
+  }
 
-  const contents = [
-    ...history.slice(-16).map((h: any) => ({
-      role: h.sender === "user" ? "user" : "model",
-      parts: [{ text: h.text }],
-    })),
-    { role: "user", parts: [{ text: userMessage }] },
+  return [
+    "What kind of career should I choose?",
+    "What should I learn next?",
+    "Find available jobs for me.",
   ];
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          system_instruction: { parts: [{ text: systemInstruction }] },
-          contents,
-          generationConfig: { maxOutputTokens: 800, temperature: 0.7 },
-        }),
-        signal: controller.signal,
-      }
-    );
-
-    if (!res.ok) {
-      const errorText = await res.text();
-      throw new Error(`Gemini API HTTP ${res.status}: ${errorText}`);
-    }
-
-    const json = await res.json();
-    return json.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
-  } finally {
-    clearTimeout(timeoutId);
-  }
 }
+
+

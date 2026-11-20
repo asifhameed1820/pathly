@@ -82,6 +82,7 @@ export function DashboardScreen({ onRestartDemo }: DashboardScreenProps) {
   const { user, profile, logout } = useAuth();
   const [activeTab, setActiveTab] = useState<NavTabId>("home");
   const [subScreen, setSubScreen] = useState<SubScreenType>(null);
+  const [aiInitialMessage, setAiInitialMessage] = useState<string | null>(null);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [selectedCourseId, setSelectedCourseId] = useState<string | null>("course-1");
   const [isSideMenuOpen, setIsSideMenuOpen] = useState(false);
@@ -206,6 +207,11 @@ export function DashboardScreen({ onRestartDemo }: DashboardScreenProps) {
         onNavigateToJobs={() => {
           setSubScreen(null);
           setActiveTab("jobs");
+        }}
+        onAnalyzeWithAi={(feedbackText) => {
+          setAiInitialMessage(feedbackText);
+          setSubScreen(null);
+          setActiveTab("ai");
         }}
       />
     );
@@ -828,8 +834,16 @@ export function DashboardScreen({ onRestartDemo }: DashboardScreenProps) {
         {/* TAB 4: AI COACH                                                           */}
         {/* ========================================================================= */}
         {activeTab === "ai" && (
-          <div className="h-full w-full flex-1 min-h-0 flex flex-col overflow-hidden">
+          <motion.div
+            key="ai-coach-tab"
+            initial={{ opacity: 0, y: 8, scale: 0.985 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            transition={{ duration: 0.26, ease: [0.16, 1, 0.3, 1] }}
+            className="h-full w-full flex-1 min-h-0 flex flex-col overflow-hidden"
+          >
             <AiCoachScreen
+              initialMessage={aiInitialMessage || undefined}
+              onClearInitialMessage={() => setAiInitialMessage(null)}
               onSelectCourse={(courseId) => {
                 setSelectedCourseId(courseId);
                 setSubScreen("course_details");
@@ -842,7 +856,7 @@ export function DashboardScreen({ onRestartDemo }: DashboardScreenProps) {
                 setActiveTab(tab);
               }}
             />
-          </div>
+          </motion.div>
         )}
 
         {/* ========================================================================= */}

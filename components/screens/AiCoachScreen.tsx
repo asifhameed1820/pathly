@@ -14,7 +14,6 @@ import {
   BookOpen,
   ArrowRight,
   ChevronRight,
-  Zap,
   Copy,
   Check,
   Sliders,
@@ -33,6 +32,8 @@ interface AiCoachScreenProps {
   onSelectJob?: (jobId: string) => void;
   onSelectCourse?: (courseId: string) => void;
   onNavigateToTab?: (tab: "home" | "jobs" | "learn" | "ai" | "profile") => void;
+  initialMessage?: string;
+  onClearInitialMessage?: () => void;
 }
 
 interface ChatMessage {
@@ -43,6 +44,10 @@ interface ChatMessage {
   recommendedJobs?: RecommendedJobPayload[];
   recommendedCourses?: RecommendedCoursePayload[];
   feedback?: "up" | "down" | null;
+  isTypingEffect?: boolean;
+  provider?: string;
+  model?: string;
+  role?: string;
 }
 
 const INTEREST_PRESETS = [
@@ -57,10 +62,13 @@ export function AiCoachScreen({
   onSelectJob,
   onSelectCourse,
   onNavigateToTab,
+  initialMessage,
+  onClearInitialMessage,
 }: AiCoachScreenProps) {
   const [userProfile, setUserProfile] = useState<UserProfileContext>(DEFAULT_USER_PROFILE);
   const [showProfileDrawer, setShowProfileDrawer] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const initialSentRef = useRef(false);
 
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
@@ -84,7 +92,10 @@ Ask me any technical question, or request personalized advice on skills, courses
 
   const [inputValue, setInputValue] = useState("");
   const [isTyping, setIsTyping] = useState(false);
+  const [isThinking, setIsThinking] = useState(false);
+  const typingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   // Load user profile on mount
   useEffect(() => {
@@ -97,10 +108,19 @@ Ask me any technical question, or request personalized advice on skills, courses
     setUserProfile(sanitized);
   }, []);
 
+  // Cleanup typewriter interval on unmount
+  useEffect(() => {
+    return () => {
+      if (typingIntervalRef.current) {
+        clearInterval(typingIntervalRef.current);
+      }
+    };
+  }, []);
+
   // Auto-scroll to bottom of chat
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isTyping]);
+  }, [messages, isTyping, isThinking]);
 
   const handleCopyText = async (id: string, text: string) => {
     try {
@@ -136,9 +156,16 @@ Ask me any technical question, or request personalized advice on skills, courses
       timestamp: new Date(),
     };
 
+    // Include the new userMsg in history so that context memory is 100% up to date
+    const currentHistory = [...messages, userMsg].slice(-20).map((m) => ({
+      sender: m.sender,
+      text: m.text,
+    }));
+
     setMessages((prev) => [...prev, userMsg]);
     setInputValue("");
     setIsTyping(true);
+    setIsThinking(true);
 
     const startTime = Date.now();
 
@@ -148,22 +175,21 @@ Ask me any technical question, or request personalized advice on skills, courses
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: msgText,
-          history: messages.slice(-20).map((m) => ({
-            sender: m.sender,
-            text: m.text,
-          })),
+          history: currentHistory,
           userProfile,
         }),
       });
 
       const data = await response.json();
 
-      // Ensure a natural, deliberative thinking duration (~2200ms)
-      const MIN_THINKING_MS = 2200;
+      // Brief thinking pause for realistic ChatGPT experience before streaming text
+      const MIN_THINKING_MS = 800;
       const elapsed = Date.now() - startTime;
       if (elapsed < MIN_THINKING_MS) {
         await new Promise((resolve) => setTimeout(resolve, MIN_THINKING_MS - elapsed));
       }
+
+      setIsThinking(false);
 
       // If backend updated profile (e.g. user said "I am more interested in AI"), persist it
       if (data.updatedProfile) {
@@ -171,26 +197,69 @@ Ask me any technical question, or request personalized advice on skills, courses
         saveUserProfile(data.updatedProfile);
       }
 
+      const fullText = (data.response || "I have analyzed your request.").trim();
+      const aiId = `ai-${Date.now()}`;
+
+      // 1. Mount placeholder message with typing effect active
       const aiResponse: ChatMessage = {
-        id: `ai-${Date.now()}`,
+        id: aiId,
         sender: "ai",
-        text: data.response || "I have analyzed your request.",
+        text: "",
         timestamp: new Date(),
         recommendedJobs: data.recommendedJobs || [],
         recommendedCourses: data.recommendedCourses || [],
+        isTypingEffect: true,
+        provider: data.provider,
+        model: data.model,
+        role: data.role,
       };
 
       setMessages((prev) => [...prev, aiResponse]);
+
+      // 2. Stream typewriter characters smoothly like ChatGPT
+      await new Promise<void>((resolve) => {
+        let charIndex = 0;
+        const total = fullText.length;
+        // Step size: 2 to 4 characters per tick for smooth streaming
+        const step = Math.max(2, Math.min(5, Math.ceil(total / 70)));
+
+        if (typingIntervalRef.current) {
+          clearInterval(typingIntervalRef.current);
+        }
+
+        typingIntervalRef.current = setInterval(() => {
+          charIndex = Math.min(charIndex + step, total);
+          const currentSlice = fullText.slice(0, charIndex);
+          const isFinished = charIndex >= total;
+
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === aiId
+                ? {
+                    ...m,
+                    text: currentSlice,
+                    isTypingEffect: !isFinished,
+                  }
+                : m
+            )
+          );
+
+          if (isFinished) {
+            if (typingIntervalRef.current) {
+              clearInterval(typingIntervalRef.current);
+              typingIntervalRef.current = null;
+            }
+            resolve();
+          }
+        }, 16);
+      });
 
       if (data.suggestedFollowUps && Array.isArray(data.suggestedFollowUps) && data.suggestedFollowUps.length > 0) {
         setSuggestedPrompts(data.suggestedFollowUps);
       }
     } catch (err) {
       console.error("Chat error:", err);
-      const elapsed = Date.now() - startTime;
-      if (elapsed < 1500) {
-        await new Promise((resolve) => setTimeout(resolve, 1500 - elapsed));
-      }
+      setIsThinking(false);
       const fallbackAiResponse: ChatMessage = {
         id: `ai-err-${Date.now()}`,
         sender: "ai",
@@ -199,9 +268,34 @@ Ask me any technical question, or request personalized advice on skills, courses
       };
       setMessages((prev) => [...prev, fallbackAiResponse]);
     } finally {
+      setIsThinking(false);
       setIsTyping(false);
     }
   };
+
+  // Prefill initialMessage into the chatbot's input box (e.g. from Interview Debrief screen)
+  useEffect(() => {
+    let msgToSend = initialMessage;
+    if (!msgToSend && typeof window !== "undefined") {
+      const stored = sessionStorage.getItem("pathly_ai_initial_message");
+      if (stored) {
+        msgToSend = stored;
+        sessionStorage.removeItem("pathly_ai_initial_message");
+      }
+    }
+
+    if (msgToSend && msgToSend.trim()) {
+      const textToDeliver = msgToSend.trim();
+      setInputValue(textToDeliver);
+      onClearInitialMessage?.();
+      setTimeout(() => {
+        if (inputRef.current) {
+          inputRef.current.focus();
+          inputRef.current.setSelectionRange(textToDeliver.length, textToDeliver.length);
+        }
+      }, 100);
+    }
+  }, [initialMessage]);
 
   const handleInterestSwitch = (newInterest: string) => {
     const updated = saveUserProfile({
@@ -223,6 +317,12 @@ Ask me any technical question, or request personalized advice on skills, courses
   };
 
   const handleResetChat = () => {
+    if (typingIntervalRef.current) {
+      clearInterval(typingIntervalRef.current);
+      typingIntervalRef.current = null;
+    }
+    setIsThinking(false);
+    setIsTyping(false);
     setMessages([
       {
         id: "welcome-reset",
@@ -263,9 +363,6 @@ Ask me any technical question, or request personalized advice on skills, courses
                 <h1 className="text-[13px] sm:text-[14px] font-bold text-[#172033] truncate">
                   AI Career Assistant
                 </h1>
-                <span className="text-[9px] font-semibold bg-[#EEF2FF] text-[#635BFF] px-1.5 py-0.2 rounded-full border border-[#C7D2FE] shrink-0">
-                  Groq LPU
-                </span>
               </div>
               <p className="text-[10px] text-[#667085] truncate">
                 Tailored for {userProfile.fullName}
@@ -393,10 +490,14 @@ Ask me any technical question, or request personalized advice on skills, courses
                 )}
               >
                 {/* Render Markdown formatted text */}
-                <RenderChatContent content={msg.text} isUser={msg.sender === "user"} />
+                <RenderChatContent
+                  content={msg.text}
+                  isUser={msg.sender === "user"}
+                  isTypingEffect={msg.isTypingEffect}
+                />
 
                 {/* INLINE RECOMMENDED JOBS (Clickable to Job Details Screen) */}
-                {msg.recommendedJobs && msg.recommendedJobs.length > 0 && (
+                {!msg.isTypingEffect && msg.recommendedJobs && msg.recommendedJobs.length > 0 && (
                   <div className="mt-2.5 pt-2 border-t border-[#E8E5F2] space-y-2">
                     <div className="flex items-center gap-1.5 text-[10.5px] font-bold text-[#635BFF]">
                       <Briefcase className="w-3.5 h-3.5 shrink-0" />
@@ -439,7 +540,7 @@ Ask me any technical question, or request personalized advice on skills, courses
                 )}
 
                 {/* INLINE RECOMMENDED COURSES (Clickable to Course Details Screen) */}
-                {msg.recommendedCourses && msg.recommendedCourses.length > 0 && (
+                {!msg.isTypingEffect && msg.recommendedCourses && msg.recommendedCourses.length > 0 && (
                   <div className="mt-2 pt-2 border-t border-[#E8E5F2] space-y-1.5">
                     <div className="flex items-center gap-1.5 text-[10.5px] font-bold text-[#0284C7]">
                       <BookOpen className="w-3.5 h-3.5 shrink-0" />
@@ -471,7 +572,7 @@ Ask me any technical question, or request personalized advice on skills, courses
                 )}
 
                 {/* Response Action Bar (Copy Text & Feedback) */}
-                {msg.sender === "ai" && (
+                {!msg.isTypingEffect && msg.sender === "ai" && (
                   <div className="flex items-center justify-between mt-2 pt-1.5 border-t border-[#E4E7EC]/70 text-[10px] text-[#94A3B8]">
                     <div className="flex items-center gap-2">
                       <span className="font-semibold text-[#635BFF] text-[9.5px]">Pathly AI</span>
@@ -538,8 +639,8 @@ Ask me any technical question, or request personalized advice on skills, courses
           ))}
         </AnimatePresence>
 
-        {/* Typing indicator */}
-        {isTyping && (
+        {/* Thinking indicator */}
+        {isThinking && (
           <motion.div
             initial={{ opacity: 0, y: 5 }}
             animate={{ opacity: 1, y: 0 }}
@@ -569,6 +670,7 @@ Ask me any technical question, or request personalized advice on skills, courses
         <div className="flex items-center gap-2 max-w-full">
           <div className="flex-1 min-w-0 relative">
             <input
+              ref={inputRef}
               type="text"
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
@@ -580,16 +682,8 @@ Ask me any technical question, or request personalized advice on skills, courses
               }}
               placeholder={`Ask about jobs, skills, or your ${userProfile.readinessScore}% score...`}
               disabled={isTyping}
-              className="w-full h-[40px] pl-3.5 pr-9 rounded-full bg-[#F1F5F9] border border-[#E4E7EC] text-[12px] sm:text-[12.5px] text-[#172033] placeholder:text-[#94A3B8] focus:outline-none focus:border-[#635BFF] focus:ring-2 focus:ring-[#635BFF]/15 transition-all disabled:opacity-60"
+              className="w-full h-[40px] px-3.5 rounded-full bg-[#F1F5F9] border border-[#E4E7EC] text-[12px] sm:text-[12.5px] text-[#172033] placeholder:text-[#94A3B8] focus:outline-none focus:border-[#635BFF] focus:ring-2 focus:ring-[#635BFF]/15 transition-all disabled:opacity-60"
             />
-            <button
-              type="button"
-              onClick={() => handleSend("Give me tailored advice for my top matching job in Pathly")}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#94A3B8] hover:text-[#635BFF] transition-colors p-1"
-              title="Quick insight"
-            >
-              <Zap className="w-3.5 h-3.5" />
-            </button>
           </div>
 
           <button
@@ -606,7 +700,7 @@ Ask me any technical question, or request personalized advice on skills, courses
         <div className="pt-1.5 pb-0.5">
           <div className="flex items-center gap-1 text-[9px] text-[#94A3B8] justify-center text-center truncate">
             <AlertCircle className="w-2.5 h-2.5 shrink-0" />
-            <span className="truncate">Personalized career guidance · Powered by Groq LPU</span>
+            <span className="truncate">Dual AI Engine · Groq Qwen (Fast Career) & Google Gemini Flash (Advanced Guidance)</span>
           </div>
         </div>
       </div>
@@ -615,11 +709,28 @@ Ask me any technical question, or request personalized advice on skills, courses
 }
 
 // ============================================================================
-// Markdown Renderer Component for AI Responses
+// Markdown Renderer Component for AI Responses with ChatGPT Typing Cursor
 // ============================================================================
-function RenderChatContent({ content, isUser }: { content: string; isUser: boolean }) {
+function RenderChatContent({
+  content,
+  isUser,
+  isTypingEffect = false,
+}: {
+  content: string;
+  isUser: boolean;
+  isTypingEffect?: boolean;
+}) {
   if (isUser) {
     return <div className="whitespace-pre-line break-words">{content}</div>;
+  }
+
+  // If text hasn't arrived yet but typing indicator is live
+  if (!content && isTypingEffect) {
+    return (
+      <div className="flex items-center min-h-[18px]">
+        <span className="inline-block w-2 h-3.5 bg-[#635BFF] rounded-xs animate-pulse" />
+      </div>
+    );
   }
 
   const lines = content.split("\n");
@@ -627,10 +738,17 @@ function RenderChatContent({ content, isUser }: { content: string; isUser: boole
   return (
     <div className="space-y-1.5 text-[12px] leading-relaxed break-words">
       {lines.map((line, idx) => {
+        const isLastLine = idx === lines.length - 1;
         const trimmed = line.trim();
 
         if (!trimmed) {
-          return <div key={idx} className="h-1" />;
+          return (
+            <div key={idx} className="h-1">
+              {isLastLine && isTypingEffect && (
+                <span className="inline-block w-2 h-3.5 bg-[#635BFF] rounded-xs animate-pulse align-middle" />
+              )}
+            </div>
+          );
         }
 
         // Header 3
@@ -638,6 +756,9 @@ function RenderChatContent({ content, isUser }: { content: string; isUser: boole
           return (
             <h4 key={idx} className="font-bold text-[12.5px] sm:text-[13px] text-[#0F172A] mt-2 mb-1">
               {formatInline(trimmed.replace(/^###\s+/, ""))}
+              {isLastLine && isTypingEffect && (
+                <span className="inline-block w-2 h-3.5 bg-[#635BFF] ml-1 rounded-xs animate-pulse align-middle" />
+              )}
             </h4>
           );
         }
@@ -647,6 +768,9 @@ function RenderChatContent({ content, isUser }: { content: string; isUser: boole
           return (
             <h3 key={idx} className="font-extrabold text-[13px] sm:text-[13.5px] text-[#0F172A] mt-2 mb-1">
               {formatInline(trimmed.replace(/^#+\s+/, ""))}
+              {isLastLine && isTypingEffect && (
+                <span className="inline-block w-2 h-3.5 bg-[#635BFF] ml-1 rounded-xs animate-pulse align-middle" />
+              )}
             </h3>
           );
         }
@@ -657,7 +781,12 @@ function RenderChatContent({ content, isUser }: { content: string; isUser: boole
           return (
             <div key={idx} className="flex items-start gap-1.5 pl-0.5">
               <span className="text-[#635BFF] font-bold text-[12px] leading-none mt-1 shrink-0">•</span>
-              <div className="flex-1 min-w-0">{formatInline(itemText)}</div>
+              <div className="flex-1 min-w-0">
+                {formatInline(itemText)}
+                {isLastLine && isTypingEffect && (
+                  <span className="inline-block w-2 h-3.5 bg-[#635BFF] ml-1 rounded-xs animate-pulse align-middle" />
+                )}
+              </div>
             </div>
           );
         }
@@ -670,13 +799,25 @@ function RenderChatContent({ content, isUser }: { content: string; isUser: boole
               <span className="font-bold text-[#635BFF] text-[11px] min-w-[14px] shrink-0">
                 {numMatch[1]}.
               </span>
-              <div className="flex-1 min-w-0">{formatInline(numMatch[2])}</div>
+              <div className="flex-1 min-w-0">
+                {formatInline(numMatch[2])}
+                {isLastLine && isTypingEffect && (
+                  <span className="inline-block w-2 h-3.5 bg-[#635BFF] ml-1 rounded-xs animate-pulse align-middle" />
+                )}
+              </div>
             </div>
           );
         }
 
         // Normal paragraph
-        return <p key={idx}>{formatInline(trimmed)}</p>;
+        return (
+          <p key={idx}>
+            {formatInline(trimmed)}
+            {isLastLine && isTypingEffect && (
+              <span className="inline-block w-2 h-3.5 bg-[#635BFF] ml-1 rounded-xs animate-pulse align-middle" />
+            )}
+          </p>
+        );
       })}
     </div>
   );

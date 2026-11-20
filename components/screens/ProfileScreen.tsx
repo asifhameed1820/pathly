@@ -48,6 +48,7 @@ import {
   FileCheck,
   FileUp,
 } from "lucide-react";
+import { ResumeStructuredData, ResumeComparisonData } from "@/lib/resumeTypes";
 
 type ProfilePage =
   | "menu"
@@ -87,12 +88,18 @@ export function ProfileScreen({
 
   // Replace Resume Modal state
   const [showReplaceModal, setShowReplaceModal] = useState(false);
+  const [showPreviewModal, setShowPreviewModal] = useState(false);
   const [selectedUploadFile, setSelectedUploadFile] = useState<{
     name: string;
     size: string;
     valid: boolean;
     error?: string;
+    fileObj?: File;
   } | null>(null);
+  const [analyzedResumeData, setAnalyzedResumeData] = useState<ResumeStructuredData | null>(null);
+  const [optimizedResumeData, setOptimizedResumeData] = useState<ResumeStructuredData | null>(null);
+  const [activeResumeData, setActiveResumeData] = useState<ResumeStructuredData | null>(null);
+  const [resumeComparison, setResumeComparison] = useState<ResumeComparisonData | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadPercent, setUploadPercent] = useState(0);
   const [analysisStep, setAnalysisStep] = useState(0);
@@ -255,7 +262,7 @@ export function ProfileScreen({
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const allowedExtensions = [".pdf", ".docx", ".doc"];
+    const allowedExtensions = [".pdf", ".docx"];
     const ext = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
     const isAllowed = allowedExtensions.includes(ext);
 
@@ -281,56 +288,145 @@ export function ProfileScreen({
 
     setSelectedUploadFile({
       name: file.name,
-      size: `${(file.size / (1024 * 1024)).toFixed(1)} MB`,
+      size: `${(file.size / 1024).toFixed(0)} KB`,
       valid: true,
+      fileObj: file,
     });
   };
 
-  const handleUploadAndAnalyze = () => {
-    if (!selectedUploadFile || !selectedUploadFile.valid) return;
+  const handleUploadAndAnalyze = async () => {
+    if (!selectedUploadFile || !selectedUploadFile.valid || !selectedUploadFile.fileObj) return;
+
     setIsUploading(true);
-    setUploadPercent(0);
-    setAnalysisStep(0);
+    setUploadPercent(15);
+    setAnalysisStep(1);
 
-    let p = 0;
-    const progressTimer = setInterval(() => {
-      p += 25;
-      setUploadPercent(p);
-      if (p >= 100) {
-        clearInterval(progressTimer);
-        let step = 1;
-        const analysisTimer = setInterval(() => {
-          setAnalysisStep(step);
-          step += 1;
-          if (step > 5) {
-            clearInterval(analysisTimer);
-            setTimeout(() => {
-              setIsUploading(false);
-              setCurrentResumeName(selectedUploadFile.name);
-              setShowReplaceModal(false);
-              setSelectedUploadFile(null);
-              setHasOptimized(false);
-              setActiveResumeVersion("original");
-              triggerToast(`✓ Resume Updated: ${selectedUploadFile.name}`);
-            }, 500);
-          }
-        }, 300);
+    const stepInterval = setInterval(() => {
+      setUploadPercent((prev) => (prev < 85 ? prev + 15 : 85));
+      setAnalysisStep((prev) => (prev < 5 ? prev + 1 : 5));
+    }, 450);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", selectedUploadFile.fileObj);
+      formData.append("targetJobDescription", profile?.target_role || profile?.headline || "");
+
+      const res = await fetch("/api/resume/analyze-optimize", {
+        method: "POST",
+        body: formData,
+      });
+
+      clearInterval(stepInterval);
+      const data = await res.json();
+
+      if (!res.ok || !data.success) {
+        setIsUploading(false);
+        triggerToast(data.error || "Failed to analyze document.");
+        return;
       }
-    }, 120);
-  };
 
-  const handleStartOptimization = () => {
-    setIsOptimizing(true);
-    setTimeout(() => {
-      setIsOptimizing(false);
+      setUploadPercent(100);
+      setAnalysisStep(5);
+
+      setAnalyzedResumeData(data.originalResume);
+      setOptimizedResumeData(data.optimizedResume);
+      setActiveResumeData(data.optimizedResume);
+      setResumeComparison(data.comparison);
+      setCurrentResumeName(selectedUploadFile.name);
       setHasOptimized(true);
       setActiveResumeVersion("improved");
-      triggerToast("✓ Resume optimized (+8 points)!");
-    }, 1500);
+
+      setTimeout(() => {
+        setIsUploading(false);
+        setShowReplaceModal(false);
+        setSelectedUploadFile(null);
+        triggerToast(`✓ Resume Analyzed: ${data.optimizedResume?.contact?.fullName || selectedUploadFile.name}`);
+        setShowPreviewModal(true);
+      }, 500);
+    } catch (err: any) {
+      clearInterval(stepInterval);
+      console.error("[ProfileScreen] Upload error:", err);
+      setIsUploading(false);
+      triggerToast("Error analyzing resume. Please try again.");
+    }
+  };
+
+  const handleStartOptimization = async () => {
+    setIsOptimizing(true);
+    try {
+      const source = analyzedResumeData || activeResumeData;
+      if (source) {
+        const res = await fetch("/api/resume/analyze-optimize", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            rawText: JSON.stringify(source),
+            targetJobDescription: profile?.target_role || profile?.headline || "",
+          }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          setOptimizedResumeData(data.optimizedResume);
+          setActiveResumeData(data.optimizedResume);
+          setResumeComparison(data.comparison);
+          setHasOptimized(true);
+          setActiveResumeVersion("improved");
+          triggerToast(`✓ Resume optimized (+${data.comparison.optimizedScore - data.comparison.originalScore} points)!`);
+          setIsOptimizing(false);
+          return;
+        }
+      }
+    } catch (e) {
+      console.error("Optimization error:", e);
+    }
+    setIsOptimizing(false);
+    setHasOptimized(true);
+    setActiveResumeVersion("improved");
+    triggerToast("✓ Resume optimization updated!");
+  };
+
+  const downloadActiveResume = async (format: "pdf" | "docx" = "pdf") => {
+    const resumeToExport = activeResumeData || optimizedResumeData || analyzedResumeData;
+    if (!resumeToExport) {
+      triggerToast("No resume available to download. Please upload your resume first.");
+      return;
+    }
+
+    try {
+      triggerToast(`Preparing ${format.toUpperCase()} download...`);
+      const res = await fetch("/api/resume/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resumeData: resumeToExport, format }),
+      });
+      if (!res.ok) throw new Error("Export failed");
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const candidateName = (resumeToExport.contact?.fullName || "Candidate")
+        .replace(/[^a-zA-Z0-9_-]/g, "_")
+        .trim();
+      a.download = `${candidateName}_Optimized_Resume.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+      triggerToast(`✓ Downloaded ${format.toUpperCase()} successfully`);
+    } catch (e: any) {
+      triggerToast(`Download failed: ${e.message}`);
+    }
   };
 
   // Circular progress calculation for AI Resume Score
-  const currentDisplayScore = hasOptimized && activeResumeVersion === "improved" ? 94 : 86;
+  const currentDisplayScore =
+    resumeComparison
+      ? activeResumeVersion === "improved"
+        ? resumeComparison.optimizedScore
+        : resumeComparison.originalScore
+      : hasOptimized && activeResumeVersion === "improved"
+      ? 94
+      : 86;
   const radius = 38;
   const circumference = 2 * Math.PI * radius;
   const strokeDashoffset = circumference - (currentDisplayScore / 100) * circumference;
@@ -557,6 +653,313 @@ export function ProfileScreen({
                   )}
                 </div>
               )}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ======================================================================= */}
+      {/* OPTIMISED RESUME PREVIEW MODAL                                          */}
+      {/* ======================================================================= */}
+      <AnimatePresence>
+        {showPreviewModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6 overflow-hidden pointer-events-auto"
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0, y: 15 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.95, opacity: 0, y: 15 }}
+              className="w-full max-w-2xl bg-white rounded-[20px] shadow-2xl border border-[#E8E5F2] flex flex-col max-h-[90vh] overflow-hidden"
+            >
+              {/* Header */}
+              <div className="px-5 py-3.5 border-b border-[#E8E5F2] flex items-center justify-between bg-[#FAF9FF] shrink-0">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-9 h-9 rounded-[10px] bg-[#ECFBF5] text-[#22C995] flex items-center justify-center shrink-0">
+                    <Sparkles className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-[14.5px] font-bold text-[#17152A]">
+                      Optimised Resume Preview
+                    </h3>
+                    <p className="text-[11px] text-[#667085] flex items-center gap-1.5">
+                      <span>ATS Score: <strong className="text-[#087F5B]">{currentDisplayScore}/100</strong> ({currentDisplayScore >= 85 ? "Excellent" : "Good"})</span>
+                      <span>•</span>
+                      <span className="text-[#22C995] font-semibold">Ready to apply</span>
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => downloadActiveResume("pdf")}
+                    className="px-3 py-1.5 rounded-[9px] bg-[#635BFF] text-white hover:bg-[#5349E8] transition-all text-[11.5px] font-bold flex items-center gap-1 shadow-xs"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Download PDF</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => downloadActiveResume("docx")}
+                    className="px-3 py-1.5 rounded-[9px] bg-white border border-[#CBD5E1] text-[#1E293B] hover:bg-[#F1F5F9] transition-all text-[11.5px] font-bold flex items-center gap-1 shadow-xs"
+                  >
+                    <Download className="w-3.5 h-3.5 text-[#2563EB]" />
+                    <span>DOCX</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowPreviewModal(false)}
+                    className="p-1.5 rounded-full hover:bg-[#E8E5F2] text-[#64748B] transition-colors"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Scrollable Document Body */}
+              {activeResumeData || optimizedResumeData || analyzedResumeData ? (
+                (() => {
+                  const currentResume = (activeResumeData || optimizedResumeData || analyzedResumeData)!;
+                  return (
+                    <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-4 text-[#0F172A] bg-white text-left font-sans select-text">
+                      {/* Contact Line */}
+                      <div className="text-center pb-4 border-b border-[#E2E8F0] space-y-1">
+                        <h1 className="text-[22px] font-extrabold tracking-tight text-[#0F172A]">
+                          {currentResume.contact?.fullName || user?.full_name || personalInfo.fullName}
+                        </h1>
+                        <p className="text-[13px] font-bold text-[#635BFF]">
+                          {currentResume.contact?.professionalTitle || profile?.headline || "Professional Profile"}
+                        </p>
+                        <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px] text-[#64748B] pt-1">
+                          {currentResume.contact?.email && <span>{currentResume.contact.email}</span>}
+                          {currentResume.contact?.phone && <span>• {currentResume.contact.phone}</span>}
+                          {currentResume.contact?.location && <span>• {currentResume.contact.location}</span>}
+                          {currentResume.contact?.linkedinUrl && (
+                            <span>• {currentResume.contact.linkedinUrl}</span>
+                          )}
+                          {currentResume.contact?.githubUrl && (
+                            <span>• {currentResume.contact.githubUrl}</span>
+                          )}
+                          {currentResume.contact?.portfolioUrl && (
+                            <span>• {currentResume.contact.portfolioUrl}</span>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Professional Summary */}
+                      {currentResume.professionalSummary && (
+                        <div className="space-y-1">
+                          <h2 className="text-[12px] font-extrabold uppercase tracking-wider text-[#635BFF] border-b border-[#F1EFFF] pb-1">
+                            Professional Summary
+                          </h2>
+                          <p className="text-[12px] text-[#334155] leading-relaxed">
+                            {currentResume.professionalSummary}
+                          </p>
+                        </div>
+                      )}
+
+                      {/* Technical Skills */}
+                      {currentResume.technicalSkills && (
+                        <div className="space-y-1.5">
+                          <h2 className="text-[12px] font-extrabold uppercase tracking-wider text-[#635BFF] border-b border-[#F1EFFF] pb-1">
+                            Technical Skills
+                          </h2>
+                          <div className="space-y-1 text-[11.5px]">
+                            {currentResume.technicalSkills.languages && currentResume.technicalSkills.languages.length > 0 && (
+                              <p>
+                                <strong className="text-[#1E293B]">Languages:</strong>{" "}
+                                <span className="text-[#475569]">
+                                  {currentResume.technicalSkills.languages.join(", ")}
+                                </span>
+                              </p>
+                            )}
+                            {currentResume.technicalSkills.frameworks && currentResume.technicalSkills.frameworks.length > 0 && (
+                              <p>
+                                <strong className="text-[#1E293B]">Frameworks & Libraries:</strong>{" "}
+                                <span className="text-[#475569]">
+                                  {currentResume.technicalSkills.frameworks.join(", ")}
+                                </span>
+                              </p>
+                            )}
+                            {currentResume.technicalSkills.toolsAndCloud && currentResume.technicalSkills.toolsAndCloud.length > 0 && (
+                              <p>
+                                <strong className="text-[#1E293B]">Tools, Cloud & Infrastructure:</strong>{" "}
+                                <span className="text-[#475569]">
+                                  {currentResume.technicalSkills.toolsAndCloud.join(", ")}
+                                </span>
+                              </p>
+                            )}
+                            {currentResume.technicalSkills.other && currentResume.technicalSkills.other.length > 0 && (
+                              <p>
+                                <strong className="text-[#1E293B]">Other Competencies:</strong>{" "}
+                                <span className="text-[#475569]">
+                                  {currentResume.technicalSkills.other.join(", ")}
+                                </span>
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Work Experience */}
+                      {currentResume.experience && currentResume.experience.length > 0 && (
+                        <div className="space-y-2.5">
+                          <h2 className="text-[12px] font-extrabold uppercase tracking-wider text-[#635BFF] border-b border-[#F1EFFF] pb-1">
+                            Work Experience & Practical Simulations
+                          </h2>
+                          <div className="space-y-3">
+                            {currentResume.experience.map((exp, idx) => (
+                              <div key={exp.id || `exp-${idx}`} className="space-y-1">
+                                <div className="flex items-center justify-between text-[12px]">
+                                  <p className="font-bold text-[#0F172A]">
+                                    {exp.role} · <span className="font-semibold text-[#475569]">{exp.company}</span>
+                                  </p>
+                                  {exp.duration && (
+                                    <span className="text-[11px] text-[#64748B] font-medium">{exp.duration}</span>
+                                  )}
+                                </div>
+                                {exp.location && (
+                                  <p className="text-[10.5px] text-[#64748B]">{exp.location}</p>
+                                )}
+                                {exp.bullets && exp.bullets.length > 0 && (
+                                  <ul className="list-disc list-inside space-y-1 text-[11.5px] text-[#334155] leading-relaxed pl-1">
+                                    {exp.bullets.map((b, bIdx) => (
+                                      <li key={bIdx}>{b}</li>
+                                    ))}
+                                  </ul>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Key Projects */}
+                      {currentResume.projects && currentResume.projects.length > 0 && (
+                        <div className="space-y-1.5">
+                          <h2 className="text-[12px] font-extrabold uppercase tracking-wider text-[#635BFF] border-b border-[#F1EFFF] pb-1">
+                            Projects
+                          </h2>
+                          <div className="space-y-2">
+                            {currentResume.projects.map((proj, idx) => (
+                              <div key={proj.id || `proj-${idx}`} className="space-y-1">
+                                <div className="flex items-center justify-between text-[12px]">
+                                  <p className="font-bold text-[#0F172A]">{proj.name}</p>
+                                  {proj.duration && (
+                                    <span className="text-[11px] text-[#64748B]">{proj.duration}</span>
+                                  )}
+                                </div>
+                                {proj.techStack && proj.techStack.length > 0 && (
+                                  <p className="text-[10.5px] text-[#635BFF] font-semibold">
+                                    Tech Stack: {proj.techStack.join(", ")}
+                                  </p>
+                                )}
+                                {proj.bullets && proj.bullets.length > 0 && (
+                                  <ul className="list-disc list-inside space-y-0.5 text-[11.5px] text-[#334155]">
+                                    {proj.bullets.map((b, bIdx) => (
+                                      <li key={bIdx}>{b}</li>
+                                    ))}
+                                  </ul>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Education */}
+                      {currentResume.education && currentResume.education.length > 0 && (
+                        <div className="space-y-1.5">
+                          <h2 className="text-[12px] font-extrabold uppercase tracking-wider text-[#635BFF] border-b border-[#F1EFFF] pb-1">
+                            Education
+                          </h2>
+                          <div className="space-y-2">
+                            {currentResume.education.map((edu, idx) => (
+                              <div key={edu.id || `edu-${idx}`} className="flex items-center justify-between text-[12px]">
+                                <div>
+                                  <p className="font-bold text-[#0F172A]">{edu.degree}</p>
+                                  <p className="text-[11px] text-[#64748B]">
+                                    {edu.institution}
+                                    {edu.gpaOrScore ? ` · ${edu.gpaOrScore}` : ""}
+                                  </p>
+                                </div>
+                                {edu.graduationYear && (
+                                  <span className="text-[11px] text-[#64748B] font-medium">{edu.graduationYear}</span>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Certifications */}
+                      {currentResume.certifications && currentResume.certifications.length > 0 && (
+                        <div className="space-y-1.5">
+                          <h2 className="text-[12px] font-extrabold uppercase tracking-wider text-[#635BFF] border-b border-[#F1EFFF] pb-1">
+                            Certifications
+                          </h2>
+                          <ul className="list-disc list-inside space-y-0.5 text-[11.5px] text-[#334155]">
+                            {currentResume.certifications.map((cert, idx) => (
+                              <li key={idx}>{cert}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()
+              ) : (
+                <div className="flex-1 flex flex-col items-center justify-center p-8 text-center space-y-4">
+                  <div className="w-14 h-14 rounded-full bg-[#F1EFFF] text-[#635BFF] flex items-center justify-center">
+                    <FileText className="w-7 h-7" />
+                  </div>
+                  <div className="space-y-1">
+                    <h3 className="text-[16px] font-bold text-[#17152A]">No Resume Uploaded Yet</h3>
+                    <p className="text-[12.5px] text-[#64748B] max-w-sm">
+                      Please upload your PDF or DOCX resume to view your ATS score and AI-optimized preview.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowPreviewModal(false);
+                      setShowReplaceModal(true);
+                    }}
+                    className="px-5 py-2.5 rounded-[10px] bg-[#635BFF] text-white text-[13px] font-bold hover:bg-[#5349E8] transition-all shadow-sm"
+                  >
+                    Upload Resume Now
+                  </button>
+                </div>
+              )}
+
+              {/* Footer Action Bar */}
+              <div className="p-4 bg-[#FAF9FF] border-t border-[#E8E5F2] flex items-center justify-between gap-3 shrink-0">
+                <span className="text-[11.5px] text-[#64748B]">
+                  Click below to download your approved resume file:
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => downloadActiveResume("docx")}
+                    className="px-3.5 py-2 rounded-[10px] bg-white border border-[#CBD5E1] text-[#1E293B] hover:bg-[#F1F5F9] transition-all text-[12px] font-bold flex items-center gap-1.5 shadow-2xs"
+                  >
+                    <Download className="w-3.5 h-3.5 text-[#2563EB]" />
+                    <span>Download DOCX</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => downloadActiveResume("pdf")}
+                    className="px-4 py-2 rounded-[10px] bg-[#635BFF] text-white hover:bg-[#5349E8] transition-all text-[12px] font-bold flex items-center gap-1.5 shadow-sm"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Download PDF</span>
+                  </button>
+                </div>
+              </div>
             </motion.div>
           </motion.div>
         )}
@@ -1158,8 +1561,8 @@ export function ProfileScreen({
                     </div>
                     <div className="min-w-0 flex-1">
                       <p className="text-[13px] font-semibold text-[#17152A] truncate">
-                        {activeResumeVersion === "improved"
-                          ? "Alex_Morgan_Resume_Optimized.pdf"
+                        {activeResumeVersion === "improved" && (activeResumeData || optimizedResumeData)
+                          ? `${((activeResumeData || optimizedResumeData)?.contact?.fullName || "Candidate").replace(/\s+/g, "_")}_Optimized_Resume.pdf`
                           : currentResumeName}
                       </p>
                       <p className="text-[11.5px] text-[#667085]">
@@ -1172,7 +1575,7 @@ export function ProfileScreen({
                   <div className="flex items-center gap-2.5 text-[12.5px] font-semibold shrink-0">
                     <button
                       type="button"
-                      onClick={() => triggerToast("Viewing PDF preview")}
+                      onClick={() => setShowPreviewModal(true)}
                       className="text-[#6D5DF5] hover:underline"
                     >
                       View
@@ -1398,7 +1801,7 @@ export function ProfileScreen({
                             </h4>
                           </div>
                           <span className="text-[10.5px] font-bold text-[#087F5B] bg-white border border-[#22C995] px-2.5 py-0.5 rounded-full shadow-2xs whitespace-nowrap">
-                            +8 points improvement
+                            +{Math.max(1, (resumeComparison?.optimizedScore || 94) - (resumeComparison?.originalScore || 86))} points improvement
                           </span>
                         </div>
 
@@ -1411,7 +1814,7 @@ export function ProfileScreen({
                             </div>
                             <div className="min-w-0 flex-1">
                               <p className="text-[13px] font-bold text-[#17152A] leading-snug whitespace-normal break-words">
-                                Alex_Morgan_Resume_Optimized.pdf
+                                {`${((activeResumeData || optimizedResumeData)?.contact?.fullName || "Candidate").replace(/\s+/g, "_")}_Optimized_Resume.pdf`}
                               </p>
                               <p className="text-[11px] text-[#667085] mt-0.5">
                                 Optimized today · Ready to apply
@@ -1424,7 +1827,9 @@ export function ProfileScreen({
                             {/* Column 1: Previous Score */}
                             <div className="flex-1 min-w-0">
                               <span className="text-[11px] text-[#667085] block font-medium">Previous Score</span>
-                              <span className="text-[13px] font-semibold text-[#667085] line-through">86 / 100</span>
+                              <span className="text-[13px] font-semibold text-[#667085] line-through">
+                                {resumeComparison?.originalScore || 86} / 100
+                              </span>
                             </div>
 
                             {/* Column 2: Arrow */}
@@ -1432,11 +1837,13 @@ export function ProfileScreen({
                               →
                             </div>
 
-                            {/* Column 3: New Score & +8 points */}
+                            {/* Column 3: New Score */}
                             <div className="flex-1 min-w-0 text-right">
                               <span className="text-[11px] text-[#087F5B] block font-bold">New Score</span>
                               <div className="flex items-baseline justify-end gap-1">
-                                <span className="text-[20px] font-extrabold text-[#22C995] leading-none">94</span>
+                                <span className="text-[20px] font-extrabold text-[#22C995] leading-none">
+                                  {resumeComparison?.optimizedScore || 94}
+                                </span>
                                 <span className="text-[11px] font-bold text-[#087F5B]">/ 100</span>
                               </div>
                             </div>
@@ -1447,16 +1854,18 @@ export function ProfileScreen({
                             <div className="grid grid-cols-2 gap-2">
                               <button
                                 type="button"
-                                onClick={() => triggerToast("Opening preview for Alex_Morgan_Resume_Optimized.pdf")}
-                                className="h-[42px] rounded-[10px] bg-[#FAF9FF] border border-[#E8E5F2] text-[#6D5DF5] text-[12px] font-bold hover:bg-[#F1EFFF] transition-all flex items-center justify-center"
+                                onClick={() => setShowPreviewModal(true)}
+                                className="h-[42px] rounded-[10px] bg-[#FAF9FF] border border-[#E8E5F2] text-[#6D5DF5] text-[12px] font-bold hover:bg-[#F1EFFF] transition-all flex items-center justify-center gap-1.5"
                               >
+                                <Eye className="w-3.5 h-3.5" />
                                 <span>Preview</span>
                               </button>
                               <button
                                 type="button"
-                                onClick={() => triggerToast("Downloading optimized PDF...")}
-                                className="h-[42px] rounded-[10px] bg-white border border-[#22C995] text-[#087F5B] text-[12px] font-bold hover:bg-[#F0FDF4] transition-all flex items-center justify-center"
+                                onClick={() => downloadActiveResume("pdf")}
+                                className="h-[42px] rounded-[10px] bg-white border border-[#22C995] text-[#087F5B] text-[12px] font-bold hover:bg-[#F0FDF4] transition-all flex items-center justify-center gap-1.5"
                               >
+                                <Download className="w-3.5 h-3.5" />
                                 <span>Download PDF</span>
                               </button>
                             </div>
@@ -1465,7 +1874,6 @@ export function ProfileScreen({
                               type="button"
                               onClick={() => {
                                 setActiveResumeVersion("improved");
-                                setCurrentResumeName("Alex_Morgan_Resume_Optimized.pdf");
                                 triggerToast("✓ This is now your active resume");
                               }}
                               className="w-full h-[44px] rounded-[10px] bg-[#22C995] text-white text-[12.5px] font-bold hover:bg-[#1eb685] transition-all flex items-center justify-center gap-1.5 shadow-sm"
@@ -1489,10 +1897,12 @@ export function ProfileScreen({
                               <div className="min-w-0 flex-1">
                                 <div className="flex items-center gap-1.5 flex-wrap">
                                   <span className="font-bold text-[10.5px] text-[#087F5B] bg-[#ECFBF5] px-1.5 py-0.2 rounded">Improved Resume</span>
-                                  <span className="text-[11.5px] font-extrabold text-[#087F5B]">94 / 100</span>
+                                  <span className="text-[11.5px] font-extrabold text-[#087F5B]">
+                                    {resumeComparison?.optimizedScore || 94} / 100
+                                  </span>
                                 </div>
                                 <p className="font-semibold text-[#17152A] text-[12px] leading-snug whitespace-normal break-words mt-0.5">
-                                  Alex_Morgan_Resume_Optimized.pdf
+                                  {`${((activeResumeData || optimizedResumeData)?.contact?.fullName || "Candidate").replace(/\s+/g, "_")}_Optimized_Resume.pdf`}
                                 </p>
                               </div>
                             </div>
@@ -1502,7 +1912,7 @@ export function ProfileScreen({
                               <div className="flex items-center gap-3">
                                 <button
                                   type="button"
-                                  onClick={() => triggerToast("Viewing improved resume")}
+                                  onClick={() => setShowPreviewModal(true)}
                                   className="font-semibold text-[#6D5DF5] hover:underline"
                                 >
                                   View
@@ -1510,7 +1920,7 @@ export function ProfileScreen({
                                 <span className="text-[#D1D5DB]">•</span>
                                 <button
                                   type="button"
-                                  onClick={() => triggerToast("Downloading improved resume")}
+                                  onClick={() => downloadActiveResume("pdf")}
                                   className="font-semibold text-[#6D5DF5] hover:underline"
                                 >
                                   Download
@@ -1544,10 +1954,12 @@ export function ProfileScreen({
                               <div className="min-w-0 flex-1">
                                 <div className="flex items-center gap-1.5 flex-wrap">
                                   <span className="font-bold text-[10.5px] text-[#667085] bg-[#F3F4F6] px-1.5 py-0.2 rounded">Original Resume</span>
-                                  <span className="text-[11.5px] font-semibold text-[#667085]">86 / 100</span>
+                                  <span className="text-[11.5px] font-semibold text-[#667085]">
+                                    {resumeComparison?.originalScore || 86} / 100
+                                  </span>
                                 </div>
                                 <p className="font-semibold text-[#475569] text-[12px] leading-snug whitespace-normal break-words mt-0.5">
-                                  Alex_Morgan_Resume.pdf
+                                  {currentResumeName}
                                 </p>
                               </div>
                             </div>
@@ -1557,7 +1969,7 @@ export function ProfileScreen({
                               <div className="flex items-center gap-3">
                                 <button
                                   type="button"
-                                  onClick={() => triggerToast("Viewing original resume")}
+                                  onClick={() => setShowPreviewModal(true)}
                                   className="font-semibold text-[#6D5DF5] hover:underline"
                                 >
                                   View
@@ -1565,7 +1977,7 @@ export function ProfileScreen({
                                 <span className="text-[#D1D5DB]">•</span>
                                 <button
                                   type="button"
-                                  onClick={() => triggerToast("Downloading original resume")}
+                                  onClick={() => downloadActiveResume("pdf")}
                                   className="font-semibold text-[#6D5DF5] hover:underline"
                                 >
                                   Download

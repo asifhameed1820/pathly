@@ -29,6 +29,7 @@ interface InterviewOutcomeAnalyzerProps {
   onExploreCourse?: (courseId: string) => void;
   onNavigateToLearn?: () => void;
   onNavigateToJobs?: () => void;
+  onAnalyzeWithAi?: (feedbackText: string) => void;
 }
 
 type OutcomeStatus = "passed" | "failed" | "pending";
@@ -37,6 +38,7 @@ export function InterviewOutcomeAnalyzerScreen({
   onBack,
   onExploreCourse,
   onNavigateToJobs,
+  onAnalyzeWithAi,
 }: InterviewOutcomeAnalyzerProps) {
   const [companyName, setCompanyName] = useState("Google");
   const [roleTitle, setRoleTitle] = useState("Frontend Developer");
@@ -48,6 +50,18 @@ export function InterviewOutcomeAnalyzerScreen({
   const [hasSubmitted, setHasSubmitted] = useState(true);
 
   const handleAnalyze = () => {
+    const textToSend = feedbackNotes.trim();
+    if (!textToSend) return;
+
+    if (typeof window !== "undefined") {
+      sessionStorage.setItem("pathly_ai_initial_message", textToSend);
+    }
+
+    if (onAnalyzeWithAi) {
+      onAnalyzeWithAi(textToSend);
+      return;
+    }
+
     setIsAnalyzing(true);
     setTimeout(() => {
       setIsAnalyzing(false);
